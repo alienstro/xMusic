@@ -99,7 +99,11 @@ SHA="$(curl -fsSL "$TARBALL" | shasum -a 256 | awk '{print $1}')"
 
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
-TEMP_FORMULA="$TEMP_DIR/xmusic.rb"
+# The candidate has to sit in a Formula/ directory: brew style applies its
+# stricter non-tap ruleset (Sorbet sigils, frozen string literal, top-level
+# class docs) to a formula found anywhere else, and no tap formula carries those.
+mkdir -p "$TEMP_DIR/Formula"
+TEMP_FORMULA="$TEMP_DIR/Formula/xmusic.rb"
 sed \
   -e "s|url \".*\"|url \"${TARBALL}\"|" \
   -e "s|sha256 \".*\"|sha256 \"${SHA}\"|" \
