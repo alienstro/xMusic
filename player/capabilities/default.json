@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "Lets the music.youtube.com page report playback state, search results, and control outcomes back to the daemon.",
+  "windows": [
+    "player"
+  ],
+  "remote": {
+    "urls": [
+      "https://music.youtube.com/*"
+    ]
+  },
+  "permissions": [
+    "allow-reporting"
+  ]
+}
