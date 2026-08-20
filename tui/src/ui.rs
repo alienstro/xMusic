@@ -1,10 +1,4 @@
-//! Rendering. Reads [`App`] and draws; never mutates anything but list scroll
-//! state, which ratatui owns.
-//!
-//! The interface is built as a readout rather than a set of panels: hairline
-//! rules and a fixed left gutter carry the structure, so nothing is boxed. That
-//! puts the whole weight of the layout on alignment, which is why the column
-//! widths and meter arithmetic below are exact rather than approximate.
+//! Rendering: reads [`App`] and draws it as a readout rather than a set of panels, where hairline rules and a fixed gutter carry the structure, which puts the whole weight of the layout on alignment and is why the widths and meter arithmetic below are exact.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -15,9 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 
-/// Tungsten amber, the backlight colour of an analogue VU meter, is the only
-/// chromatic accent in the interface. Everything else is graded by brightness,
-/// which reads correctly whatever colour scheme the terminal is set to.
+/// Tungsten amber, the backlight of an analogue VU meter, is the only chromatic accent; everything else is graded by brightness so it reads under any terminal scheme.
 mod ink {
     use ratatui::style::Color;
 
@@ -29,17 +21,24 @@ mod ink {
     pub const ALARM: Color = Color::Indexed(203);
 }
 
-/// Width of the selection gutter. Rendered by the list widget as its highlight
-/// symbol, and matched by hand in the column header so the two line up.
+/// Width of the selection gutter, drawn by the list widget and matched by hand in the column header so the two line up.
 const GUTTER: &str = "▌ ";
 const GUTTER_WIDTH: usize = 2;
 
 /// Cells in the volume fader.
 const FADER_CELLS: usize = 8;
 
-/// Eighth-width blocks give the progress meter sub-character resolution, so it
-/// advances smoothly at the client's poll rate instead of stepping a whole cell.
+/// Eighth-width blocks give the meter sub-character resolution, so it advances smoothly instead of stepping a whole cell.
 const EIGHTHS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+/// Braille cells for the loading spinner: single-width, centred, and the only animation in the interface.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAME_MS: u128 = 90;
+
+/// Picks the spinner cell by elapsed time rather than frame number, so it turns at one speed however often the interface redraws.
+fn spinner(elapsed: std::time::Duration) -> &'static str {
+    SPINNER[(elapsed.as_millis() / SPINNER_FRAME_MS) as usize % SPINNER.len()]
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let full = frame.area();
@@ -51,8 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    // A column of air on each side. Without it the rules run into the terminal
-    // edge and the whole thing reads as a box after all.
+    // A column of air each side, or the rules run into the terminal edge and it reads as a box after all.
     let canvas = Rect {
         x: full.x + 1,
         y: full.y,
@@ -60,10 +58,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         height: full.height,
     };
 
-    // Chrome is dropped from the least essential end first. The meter is the
-    // last thing to go, which is why the now-playing block gives up its
-    // subtitle before it gives up a line: an interface that cannot show you
-    // where you are in the track has stopped being a music player.
+    // Chrome goes from the least essential end first, and the meter goes last: an interface that cannot show where you are in the track has stopped being a music player.
     let show_columns = canvas.height >= 16;
     let show_hints = canvas.height >= 13;
     let show_subtitle = canvas.height >= 12;
@@ -174,8 +169,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     if editing {
-        // The terminal's own cursor, rather than a drawn stand-in: it blinks the
-        // way the user's terminal blinks and needs no glyph of its own.
+        // The terminal's own cursor rather than a drawn stand-in, so it blinks the way the user's terminal blinks.
         let input_width = display_width(&app.input).min(u16::MAX as usize) as u16;
         let x = area.x.saturating_add(2).saturating_add(input_width);
         frame.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y));
@@ -184,8 +178,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 // ----------------------------------------------------------------- results ----
 
-/// Column widths for the results table. Album is the first thing to go on a
-/// narrow terminal, then artist; the title and the running time always survive.
+/// Column widths for the results table: album goes first on a narrow terminal, then artist, while title and running time always survive.
 struct Columns {
     title: usize,
     artist: usize,
@@ -247,14 +240,19 @@ fn draw_column_header(frame: &mut Frame, area: Rect, columns: &Columns) {
 
 fn draw_results(frame: &mut Frame, app: &mut App, area: Rect, columns: &Columns) {
     if app.results.is_empty() {
-        let message = if app.searching {
-            "Searching"
+        let (message, style) = if app.searching {
+            (
+                format!("{} Searching", spinner(app.started.elapsed())),
+                Style::default().fg(ink::EMBER),
+            )
         } else {
-            "Search for a song to start playing"
+            (
+                "Search for a song to start playing".to_string(),
+                Style::default().fg(ink::SLATE),
+            )
         };
         frame.render_widget(
-            Paragraph::new(format!("{}{message}", " ".repeat(GUTTER_WIDTH)))
-                .style(Style::default().fg(ink::SLATE)),
+            Paragraph::new(format!("{}{message}", " ".repeat(GUTTER_WIDTH))).style(style),
             area,
         );
         return;
@@ -264,8 +262,7 @@ fn draw_results(frame: &mut Frame, app: &mut App, area: Rect, columns: &Columns)
         .results
         .iter()
         .map(|result| {
-            // Colour carries what is playing; the gutter bar carries where the
-            // selection is. Two separate channels, so neither needs a glyph.
+            // Colour carries what is playing and the gutter carries the selection, so neither needs a glyph.
             let playing = !result.video_id.is_empty() && result.video_id == app.player.video_id;
             let title_style = if playing {
                 Style::default().fg(ink::AMBER).add_modifier(Modifier::BOLD)
@@ -314,8 +311,8 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: boo
 
     let (marker, marker_style) = if !app.online {
         ("■", Style::default().fg(ink::ALARM))
-    } else if player.is_buffering {
-        ("◌", Style::default().fg(ink::ASH))
+    } else if app.is_loading() {
+        (spinner(app.started.elapsed()), Style::default().fg(ink::EMBER))
     } else if player.is_playing {
         ("▶", Style::default().fg(ink::AMBER))
     } else {
@@ -328,6 +325,11 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: boo
         Span::styled(
             if player.ready { "Nothing playing" } else { "Loading YouTube Music" },
             Style::default().fg(ink::SLATE),
+        )
+    } else if let Some(title) = app.loading_title() {
+        Span::styled(
+            title.to_string(),
+            Style::default().fg(ink::EMBER).add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
@@ -361,8 +363,7 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: boo
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The one line the interface is built around: elapsed timecode, a meter with
-/// sub-character resolution, total running time, and a fader scale.
+/// The line the interface is built around: elapsed timecode, meter, running time, fader.
 fn transport(app: &App, width: usize) -> Line<'static> {
     let player = &app.player;
     let elapsed = format!("{:<5}", clock(player.position));
@@ -406,8 +407,7 @@ fn transport(app: &App, width: usize) -> Line<'static> {
     ])
 }
 
-/// Splits a meter into its filled run, its partial leading cell, and the empty
-/// remainder, so the three can be styled separately.
+/// Splits a meter into filled run, partial leading cell and empty remainder, so the three can be styled separately.
 fn meter(width: usize, fraction: f64) -> (String, String, String) {
     if width == 0 {
         return (String::new(), String::new(), String::new());
@@ -428,8 +428,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         _ if !app.online => Style::default().fg(ink::ALARM),
         _ => Style::default().fg(ink::ASH),
     };
-    // Clipped at the terminal edge a status message loses its last word without
-    // saying so; an ellipsis at least admits it was cut.
+    // Clipped at the terminal edge a message loses its last word silently; an ellipsis at least admits the cut.
     let room = (area.width as usize).saturating_sub(GUTTER_WIDTH);
     frame.render_widget(
         Paragraph::new(format!("{}{}", " ".repeat(GUTTER_WIDTH), truncate(&app.status, room)))
@@ -438,12 +437,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Shown while typing a query. Advertising the transport keys here would be a
-/// lie: they are all just characters in the search box until Esc or Enter.
+/// Shown while typing a query, where advertising the transport keys would be a lie: they are characters in the search box until Esc or Enter.
 const EDIT_HINTS: &[&str] = &["Enter search", "Esc cancel"];
 
-/// Hints in descending order of usefulness, so a narrow terminal drops the
-/// least important ones instead of slicing a label in half.
+/// Hints in descending order of usefulness, so a narrow terminal drops the least important instead of slicing a label.
 const KEY_HINTS: &[&str] = &[
     "/ search",
     "space play",
@@ -452,6 +449,7 @@ const KEY_HINTS: &[&str] = &[
     "←/→ seek",
     "+/- vol",
     "q quit",
+    "W window",
     "Q stop daemon",
 ];
 

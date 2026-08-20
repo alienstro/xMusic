@@ -1,14 +1,4 @@
-//! Turns Tauri's fire-and-forget `eval` into a request/response call.
-//!
-//! `eval` hands a script to the webview and returns as soon as it has been
-//! queued; it cannot report what the script decided. Without something like
-//! this, every control route would answer 200 whether or not the page actually
-//! did anything — a player that has not finished loading, or a button whose
-//! selector Google has changed, would both look exactly like success.
-//!
-//! So each call carries an id. The page runs the work and reports the result
-//! back over IPC quoting that id, and the waiting request is handed the real
-//! outcome.
+//! Turns Tauri's fire-and-forget `eval` into a request/response call: each call carries an id the page quotes back over IPC, so a control route reports what the page actually did rather than answering 200 for having queued a script.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,8 +35,7 @@ pub enum WaitError {
 }
 
 impl Bridge {
-    /// Reserves an id and a slot to receive its answer. The caller is expected
-    /// to embed [`Pending::id`] in the script it evaluates.
+    /// Reserves an id and a slot for its answer; the caller embeds [`Pending::id`] in the script it evaluates.
     pub fn dispatch(&self) -> Pending<'_> {
         let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (sender, replies) = mpsc::channel();
@@ -57,8 +46,7 @@ impl Bridge {
         Pending { bridge: self, id, replies, settled: false }
     }
 
-    /// Called from the page's IPC command. Unknown ids are dropped, which is
-    /// what should happen to an answer that arrived after its caller gave up.
+    /// Called from the page's IPC command; an unknown id is an answer whose caller gave up, so it is dropped.
     pub fn settle(&self, id: u64, outcome: Outcome) {
         if let Some(sender) = self
             .waiting
@@ -103,8 +91,7 @@ impl Pending<'_> {
 
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
-        // Covers the path where the script never got evaluated, so nothing on
-        // the page will ever answer this id.
+        // The script may never have been evaluated, in which case nothing will ever answer this id.
         if !self.settled {
             self.bridge.forget(self.id);
         }

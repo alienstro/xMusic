@@ -7,11 +7,8 @@
 class Xmusic < Formula
   desc "Terminal client for YouTube Music"
   homepage "https://github.com/alienstro/xMusic"
-  url "https://github.com/alienstro/xMusic/archive/refs/tags/v0.1.0.tar.gz"
-  # Replace once v0.1.0 is tagged and pushed:
-  #   brew fetch --build-from-source ./xmusic.rb
-  # or compute it directly:
-  #   curl -sL https://github.com/alienstro/xMusic/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
+  url "https://github.com/alienstro/xMusic/archive/refs/tags/v0.2.1.tar.gz"
+  # Replace once v0.2.0 is tagged and pushed: curl -sL https://github.com/alienstro/xMusic/archive/refs/tags/v0.2.1.tar.gz | shasum -a 256
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
   head "https://github.com/alienstro/xMusic.git", branch: "main"
@@ -36,8 +33,14 @@ class Xmusic < Formula
 
         xmusic --kill-daemon
 
-      Search and playback work without signing in. To sign into your account,
-      press L inside xmusic, log in, then press H.
+      Search and playback work without signing in. Google will not accept a
+      sign-in from an embedded webview, so to use your own account you sign in
+      with your normal browser and xmusic copies that session across: press L
+      (or run `xmusic --login`), sign in when your browser opens, then press L
+      again. macOS will ask once for keychain permission, which is what lets
+      xmusic decrypt the browser's cookies.
+
+        xmusic --uninstall    # stop the daemon and delete its data
 
       The daemon logs to ~/.xmusic/daemon.log and listens on 127.0.0.1:13723.
     EOS

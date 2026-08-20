@@ -11,17 +11,14 @@ use crate::bridge::Bridge;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerState {
-    /// False while the page is still booting, or if YT Music served a page
-    /// without its player element at all.
+    /// False while the page is booting, or if YT Music served a page with no player element at all.
     pub ready: bool,
     pub video_id: String,
     pub title: String,
     pub artist: String,
     /// "Artist • Album • Year" as shown in the player bar. Cosmetic.
     pub byline: String,
-    /// Set only while `ready` is false: what the page looks like from the
-    /// injected script's point of view. The one thing worth knowing when the
-    /// daemon comes up but never reports a player.
+    /// Set only while `ready` is false: how the page looks to the injected script, which is the one thing worth knowing when the daemon never reports a player.
     pub diagnostic: String,
     pub is_playing: bool,
     pub is_buffering: bool,
@@ -46,8 +43,7 @@ pub struct SearchResult {
     pub duration: String,
 }
 
-/// The most recent search. `seq` lets a client tell fresh results from stale
-/// ones, and lets the daemon drop a reply for a query the user has moved past.
+/// The most recent search; `seq` distinguishes fresh results from stale ones and lets the daemon drop a reply for a query the user has moved past.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchState {
@@ -68,13 +64,11 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Opens a new search, returning its sequence number. Any in-flight reply
-    /// for an older sequence is discarded when it arrives.
+    /// Opens a new search and returns its sequence number; an in-flight reply for an older one is discarded on arrival.
     pub fn begin_search(&self, query: &str) -> u64 {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let mut search = self.search.lock().expect("search mutex poisoned");
-        // Keep the previous results on screen while the new ones load rather
-        // than blanking the list.
+        // Keep the previous results on screen while the new ones load, rather than blanking the list.
         let previous = std::mem::take(&mut search.results);
         *search = SearchState {
             seq,
@@ -95,8 +89,7 @@ impl Shared {
     ) {
         let mut search = self.search.lock().expect("search mutex poisoned");
         if seq != search.seq || !search.pending {
-            // A newer search has already been issued, or this request already
-            // timed out. Either way, this reply is stale.
+            // A newer search was issued, or this one timed out; either way the reply is stale.
             return;
         }
         search.query = query;

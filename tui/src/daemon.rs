@@ -19,6 +19,19 @@ const TOKEN_FILE: &str = "control.token";
 const DAEMON_BINARY: &str = "xmusic-player";
 const PROTOCOL_VERSION: u32 = 1;
 
+/// Where macOS lets the daemon leave things, scanned by name prefix because an unbundled build names its files after the executable and a bundled one after the identifier.
+const LIBRARY_DIRS: &[&str] = &[
+    "WebKit",
+    "Caches",
+    "HTTPStorages",
+    "Preferences",
+    "Saved Application State",
+    "Application Support",
+    "Containers",
+];
+
+const LEFTOVER_PREFIXES: &[&str] = &["xmusic-player", "com.xmusic.player"];
+
 #[derive(Debug)]
 pub enum Status {
     Stopped,
@@ -103,12 +116,7 @@ pub fn control_token() -> Result<String, String> {
     Ok(token.to_string())
 }
 
-/// Finds the daemon binary.
-///
-/// It normally sits next to this one, but "next to" needs care: `current_exe`
-/// is allowed to return the symlink that was invoked rather than its target,
-/// and every packaged install is a symlink. Try the resolved location first and
-/// fall back to PATH.
+/// Finds the daemon binary, resolving `current_exe` first because it may return the invoked symlink rather than its target, then falling back to PATH.
 pub fn locate_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
 
@@ -248,8 +256,7 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Stops the daemon. HTTP is preferred; the locked PID fallback is used only
-/// after verifying that the PID still belongs to xmusic-player.
+/// Stops the daemon over HTTP, falling back to the locked pid only once that pid is confirmed to be xmusic-player.
 pub fn stop() -> Result<String, String> {
     let mut request = ureq::post(&format!("{BASE_URL}/quit")).timeout(Duration::from_millis(1500));
     if let Ok(token) = control_token() {
@@ -280,6 +287,69 @@ pub fn stop() -> Result<String, String> {
     }
     cleanup_runtime_files();
     Ok(format!("daemon {pid} killed"))
+}
+
+/// Clears the way for a fresh daemon, treating "nothing to stop" as success: a crash leaves a pid file that outlives it, and refusing to start over a file no process owns helps nobody.
+pub fn reset() -> Result<String, String> {
+    let outcome = stop();
+    if matches!(status(), Status::Stopped) {
+        cleanup_runtime_files();
+        return Ok(match outcome {
+            Ok(message) => message,
+            Err(_) => "no daemon was running; cleared stale files".to_string(),
+        });
+    }
+    outcome
+}
+
+/// Everything --uninstall would delete, returned so the caller can show it before asking; the webview's cookie jar is among them, and leaving it would keep the user logged in to software they just removed.
+pub fn removable() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = support_dir() {
+        if dir.exists() {
+            paths.push(dir);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let library = PathBuf::from(home).join("Library");
+        for directory in LIBRARY_DIRS {
+            let Ok(entries) = std::fs::read_dir(library.join(directory)) else {
+                continue;
+            };
+            paths.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        LEFTOVER_PREFIXES
+                            .iter()
+                            .any(|prefix| name.starts_with(prefix))
+                    })
+            }));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Stops the daemon and deletes its data, leaving the binaries to whatever installed them.
+pub fn uninstall() -> Vec<String> {
+    let mut report = Vec::new();
+    match reset() {
+        Ok(message) => report.push(message),
+        Err(message) => report.push(format!("could not stop the daemon: {message}")),
+    }
+    for path in removable() {
+        let outcome = match path.is_dir() {
+            true => std::fs::remove_dir_all(&path),
+            false => std::fs::remove_file(&path),
+        };
+        report.push(match outcome {
+            Ok(()) => format!("removed {}", path.display()),
+            Err(error) => format!("could not remove {}: {error}", path.display()),
+        });
+    }
+    report
 }
 
 fn verified_locked_pid() -> Result<u32, String> {

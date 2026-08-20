@@ -20,5 +20,12 @@ serde.workspace = true
 serde_json.workspace = true
 unicode-width.workspace = true
 
+# Reading a YouTube session out of a Chromium browser. See src/cookies.rs.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+sha2 = "0.10"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

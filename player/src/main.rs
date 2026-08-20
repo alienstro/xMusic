@@ -1,8 +1,4 @@
-//! xmusic-player: a windowless YouTube Music playback daemon.
-//!
-//! Loads music.youtube.com in a hidden webview and exposes a small HTTP control
-//! API on 127.0.0.1:13723. The terminal client (xmusic) drives it over that
-//! API; this process owns nothing but the page and the audio.
+//! xmusic-player: a windowless YouTube Music daemon that loads music.youtube.com in a hidden webview and exposes a control API on 127.0.0.1:13723, owning nothing but the page and the audio.
 
 mod bridge;
 mod pidfile;
@@ -10,8 +6,9 @@ mod server;
 mod state;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use tauri::{State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use bridge::Outcome;
 use state::{PlayerState, SearchResult, Shared};
@@ -20,14 +17,14 @@ pub const WINDOW_LABEL: &str = "player";
 
 const YTM_URL: &str = "https://music.youtube.com";
 
-/// YT Music serves a stripped "Your browser is deprecated" page - no player, no
-/// ytcfg - to user agents it doesn't recognise, and the WKWebView default is not
-/// known to be accepted. Pinning a current desktop Chrome UA avoids the whole
-/// question. If playback ever reports `ready: false` forever, bump this.
+/// YT Music serves a player-less "browser is deprecated" page to user agents it does not recognise, so a current desktop Chrome UA is pinned here; bump it if playback ever reports `ready: false` forever.
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
 
 const INJECT: &str = include_str!("inject.js");
+
+/// How often the daemon asks the page for state: a hidden WKWebView has `setInterval` throttled to about a second, which leaves every reading visibly behind the key that changed it, and `eval` is not throttled.
+const STATE_PUMP: Duration = Duration::from_millis(200);
 
 #[tauri::command]
 fn report_state(shared: State<Arc<Shared>>, state: PlayerState) {
@@ -45,8 +42,7 @@ fn report_search_results(
     shared.finish_search(seq, query, results, error);
 }
 
-/// Reports the result of one dispatched control call. See `bridge.rs` for why
-/// this round trip exists at all.
+/// Reports the result of one dispatched control call; see `bridge.rs` for why the round trip exists.
 #[tauri::command]
 fn report_command(shared: State<Arc<Shared>>, id: u64, ok: bool, error: Option<String>) {
     shared.bridge.settle(id, Outcome { ok, error });
@@ -72,12 +68,11 @@ fn main() {
             report_command
         ])
         .setup(move |app| {
-            // No Dock icon or menu bar: this is a daemon, not an app the user
-            // switches to. The window can still be shown on demand for sign-in.
+            // No Dock icon or menu bar: this is a daemon, not an app to switch to.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            WebviewWindowBuilder::new(
+            let window = WebviewWindowBuilder::new(
                 app,
                 WINDOW_LABEL,
                 WebviewUrl::External(YTM_URL.parse().expect("YTM_URL is a valid URL")),
@@ -88,6 +83,28 @@ fn main() {
             .user_agent(USER_AGENT)
             .initialization_script(INJECT)
             .build()?;
+
+            // Closing the only window would end the process and the music with it, so the close button hides it instead.
+            window.on_window_event({
+                let window = window.clone();
+                move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            });
+
+            let pump = app.handle().clone();
+            std::thread::Builder::new()
+                .name("state-pump".into())
+                .spawn(move || loop {
+                    std::thread::sleep(STATE_PUMP);
+                    if let Some(window) = pump.get_webview_window(WINDOW_LABEL) {
+                        // Fails harmlessly while the page is still booting.
+                        let _ = window.eval("window.__xmReport && window.__xmReport()");
+                    }
+                })?;
 
             let handle = app.handle().clone();
             std::thread::Builder::new()
