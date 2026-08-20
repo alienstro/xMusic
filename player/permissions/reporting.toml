@@ -1,0 +1,20 @@
+# Tauri v2 blocks app commands from remote origins unless a permission grants
+# them explicitly - `remote.urls` on its own only opens the door, it doesn't say
+# what may come through. Without this file every invoke from music.youtube.com
+# fails with "report_state not allowed. Plugin not found".
+#
+# Application permissions take no namespace prefix, so capabilities reference
+# this as "allow-reporting" rather than "<plugin>:allow-reporting".
+
+[[permission]]
+identifier = "allow-reporting"
+description = """
+Lets the music.youtube.com page hand playback state, search results, and \
+control-call outcomes back to the daemon. All three only store data in memory; \
+none of them takes any action on the host.
+"""
+commands.allow = [
+    "report_state",
+    "report_search_results",
+    "report_command",
+]

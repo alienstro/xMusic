@@ -1,0 +1,24 @@
+[package]
+name = "xmusic-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Terminal client for the xmusic-player daemon"
+
+# The command people actually type. The crate stays xmusic-tui so the two halves
+# of the workspace still read as a pair.
+[[bin]]
+name = "xmusic"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+ureq = { version = "2", features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
