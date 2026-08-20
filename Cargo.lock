@@ -4921,7 +4921,7 @@ dependencies = [
 
 [[package]]
 name = "xmusic-player"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -4934,7 +4934,7 @@ dependencies = [
 
 [[package]]
 name = "xmusic-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes",
  "cbc",

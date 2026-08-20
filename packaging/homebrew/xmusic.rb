@@ -7,8 +7,8 @@
 class Xmusic < Formula
   desc "Terminal client for YouTube Music"
   homepage "https://github.com/alienstro/xMusic"
-  url "https://github.com/alienstro/xMusic/archive/refs/tags/v0.2.1.tar.gz"
-  # Replace once v0.2.0 is tagged and pushed: curl -sL https://github.com/alienstro/xMusic/archive/refs/tags/v0.2.1.tar.gz | shasum -a 256
+  url "https://github.com/alienstro/xMusic/archive/refs/tags/v0.2.2.tar.gz"
+  # publish.sh fills this in from the tagged tarball; see packaging/homebrew/README.md.
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
   head "https://github.com/alienstro/xMusic.git", branch: "main"
