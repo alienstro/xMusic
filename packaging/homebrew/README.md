@@ -55,9 +55,22 @@ named `homebrew-<name>`: `alienstro/homebrew-tap` becomes `alienstro/tap`.
 
 ## Releasing an update
 
-Bump and commit the workspace version, then run the two-phase `publish.sh` flow
-above. The helper refuses an existing tag that does not point at the current
-commit and leaves all remote pushes for explicit review.
+Bump the version with `scripts/bump.sh`, which writes all three files that have
+to agree — the workspace manifest, `player/tauri.conf.json`, and the tarball URL
+in `xmusic.rb`:
+
+```bash
+scripts/bump.sh patch    # or minor, or major
+```
+
+Components count 1..10 and then carry, so `0.1.10` is followed by `0.2.0`. The
+version matters beyond bookkeeping: the client refuses a daemon whose version
+differs from its own, so a forgotten file shows up as two halves that will not
+talk to each other.
+
+Then commit and run the two-phase `publish.sh` flow above. The helper refuses an
+existing tag that does not point at the current commit and leaves all remote
+pushes for explicit review.
 
 ## Installing from main without a release
 

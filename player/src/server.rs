@@ -1,6 +1,4 @@
-//! Control server on 127.0.0.1. Every mutating route turns into a JavaScript
-//! call against the hidden webview; every read serves the state the page last
-//! reported.
+//! Control server on 127.0.0.1: every mutating route becomes a JavaScript call against the hidden webview, and every read serves the state the page last reported.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -13,8 +11,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use crate::bridge::WaitError;
 use crate::state::Shared;
 
-/// How long a control call waits for the page to report back. Generous enough
-/// for a busy webview, short enough that a stuck page fails rather than hangs.
+/// How long a control call waits for the page: generous enough for a busy webview, short enough that a stuck page fails rather than hangs.
 const DISPATCH_TIMEOUT: Duration = Duration::from_millis(2000);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -29,8 +26,7 @@ pub fn run(app: AppHandle, shared: Arc<Shared>, control_token: String) {
     let server = match Server::http(BIND_ADDR) {
         Ok(server) => server,
         Err(error) => {
-            // Almost always "address in use", i.e. a daemon is already running.
-            // Exiting is the right move: two daemons would fight over playback.
+            // Almost always "address in use"; exiting is right, since two daemons would fight over playback.
             eprintln!("xmusic-player: cannot bind {BIND_ADDR}: {error}");
             eprintln!("xmusic-player: another daemon is probably already running.");
             app.exit(1);
@@ -127,8 +123,7 @@ fn handle(
                         ),
                     );
                 });
-                // serde_json produces a correctly escaped JS string literal.
-                // Interpolating the raw query here would be an injection hole.
+                // serde_json escapes this into a JS string literal; interpolating the raw query would be an injection hole.
                 let literal = serde_json::to_string(query).expect("string serialises");
                 match eval(app, &format!("window.__xmSearch({seq}, {literal})")) {
                     Ok(()) => (202, json!({ "seq": seq }).to_string()),
@@ -177,15 +172,30 @@ fn handle(
             None => (400, error_body("expected \"level\" or \"delta\"")),
         },
 
-        // Makes the hidden window visible so the user can sign in, without
-        // needing a recompile to flip a `visible(false)` flag.
+        // Takes a session copied out of the user's real browser, which is the only way this page can be logged in at all; see cookies.rs in the tui crate.
+        (Method::Post, "/cookies") => match body.get("cookies") {
+            Some(cookies) if cookies.is_array() => {
+                let outcome = dispatch(app, shared, "adopt_cookies", json!({ "cookies": cookies }));
+                if outcome.0 == 200 {
+                    // YT Music decides who you are at boot, so the cookies mean nothing until the page starts again.
+                    let handle = app.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(150));
+                        let _ = eval(&handle, "location.replace('https://music.youtube.com')");
+                    });
+                }
+                outcome
+            }
+            _ => (400, error_body("expected a \"cookies\" array")),
+        },
+
+        // Reveals the hidden window without needing a recompile to flip `visible(false)`.
         (Method::Post, "/show-window") => respond(set_visible(app, true)),
         (Method::Post, "/hide-window") => respond(set_visible(app, false)),
 
         (Method::Post, "/quit") => {
             let handle = app.clone();
-            // Respond before exiting, otherwise the caller sees a dropped
-            // connection instead of an acknowledgement.
+            // Respond before exiting, or the caller sees a dropped connection instead of an acknowledgement.
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 handle.exit(0);
@@ -193,10 +203,7 @@ fn handle(
             (200, json!({ "ok": true, "quitting": true }).to_string())
         }
 
-        // Reads the page's own view of itself without going through IPC, which
-        // is exactly what you need when IPC is the thing that's broken. The
-        // probe is smuggled out through the document URL's fragment, since
-        // `eval` cannot return a value.
+        // Reads the page's view of itself without using IPC, for when IPC is the broken thing; the probe comes out through the URL fragment because `eval` cannot return a value.
         (Method::Get, "/diagnose") => match diagnose(app) {
             Ok(report) => (200, report),
             Err(message) => (503, error_body(&message)),
@@ -206,11 +213,7 @@ fn handle(
     }
 }
 
-/// Runs one control action on the page and answers with what actually happened.
-///
-/// 200 means the page did it. 409 means the page is there but could not — the
-/// player has not loaded, or a control it needs is missing. 503/504 mean the
-/// page never answered at all.
+/// Runs one control action and answers with what happened: 200 the page did it, 409 the page could not, 503/504 the page never answered.
 fn dispatch(app: &AppHandle, shared: &Arc<Shared>, action: &str, args: Value) -> (u16, String) {
     let pending = shared.bridge.dispatch();
     let script = format!(
@@ -296,8 +299,7 @@ fn read_body(request: &mut Request) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|error| format!("invalid JSON body: {error}"))
 }
 
-/// Reads either an absolute (`absolute_key`) or relative (`relative_key`)
-/// numeric argument, returning the value and whether it is relative.
+/// Reads an absolute (`absolute_key`) or relative (`relative_key`) number, returning the value and which it was.
 fn numeric_arg(body: &Value, absolute_key: &str, relative_key: &str) -> Option<(i64, bool)> {
     if let Some(value) = body.get(absolute_key).and_then(Value::as_i64) {
         return Some((value, false));
@@ -307,8 +309,7 @@ fn numeric_arg(body: &Value, absolute_key: &str, relative_key: &str) -> Option<(
         .map(|value| (value, true))
 }
 
-/// YouTube ids are 11 URL-safe base64 characters. Checked so a malformed id
-/// can't reach the page as something other than an id.
+/// YouTube ids are 11 URL-safe base64 characters, checked so a malformed one cannot reach the page as something other than an id.
 fn is_video_id(candidate: &str) -> bool {
     candidate.len() == 11
         && candidate
@@ -387,8 +388,7 @@ fn diagnose(app: &AppHandle) -> Result<String, String> {
     percent_decode(encoded)
 }
 
-/// Minimal percent-decoder: the probe payload is JSON put through
-/// `encodeURIComponent`, so only `%XX` escapes need undoing.
+/// Minimal percent-decoder: the probe payload is `encodeURIComponent` output, so only `%XX` escapes need undoing.
 fn percent_decode(input: &str) -> Result<String, String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

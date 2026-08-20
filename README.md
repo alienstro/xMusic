@@ -149,12 +149,27 @@ first.
 Search and playback both work signed out, so this is optional. Sign in for your
 own library and recommendations, and an ad-free stream if you pay for Premium.
 
-1. Press `L` — the daemon's hidden window appears
-2. Log into Google in that window
-3. Press `H` to hide it again
+Google refuses to accept a sign-in from an embedded webview — it answers "this
+browser or app may not be secure" — so xmusic never asks for your password and
+the hidden window can never be logged into directly. You sign in with your
+normal browser instead, and xmusic copies that session across:
 
-The session persists in the webview's cookie store, so it is a one-off. There is
-no config file to edit and nothing to recompile.
+1. Press `L` — if no signed-in session is found, your browser opens at
+   music.youtube.com
+2. Sign in there as you normally would
+3. Press `L` again — xmusic reads the youtube.com cookies from your browser and
+   hands them to the player, which reloads as you
+
+Same thing from a shell: `xmusic --login`.
+
+Brave, Chrome, Edge, Arc, Vivaldi and Chromium are supported. Reading the
+cookies means decrypting them with a key held in your login keychain, so macOS
+asks for permission the first time — that prompt is the whole cost of the
+arrangement. Only the seventeen cookies that carry a YouTube session are read,
+never the rest of your browsing.
+
+The session then persists in the webview's own cookie store, so it is a one-off.
+`xmusic --uninstall` deletes it again.
 
 ### Leave it, or stop it
 
@@ -173,6 +188,7 @@ When you do want it to stop:
 |---|---|
 | `Q` in the interface | Confirms first, then stops the daemon and exits |
 | `xmusic --kill-daemon` | From any terminal |
+| `xmusic --restart` | When it is wedged rather than stopped |
 | `POST /quit` | The underlying authenticated endpoint |
 | `SIGTERM`, then `SIGKILL` | Automatic fallback only while `~/.xmusic/daemon.pid` is locked by a verified `xmusic-player` process |
 
@@ -180,9 +196,12 @@ When you do want it to stop:
 
 ```bash
 xmusic                  # connect, starting the daemon if needed
+xmusic --login          # copy your browser's YouTube session into the player
+xmusic --restart        # stop whatever is there, start fresh, open the interface
 xmusic --no-spawn       # fail instead of starting a daemon
 xmusic --daemon-status  # is it running?
 xmusic --kill-daemon    # stop it
+xmusic --uninstall      # stop the daemon and delete its data (asks first)
 xmusic --help
 ```
 
@@ -244,7 +263,8 @@ Every binding, including the ones step 4 above leaves out.
 | `n` / `p` | Next / previous track |
 | `←` / `→`, `h` / `l` | Seek ∓5s |
 | `+` / `-` | Volume ±5 |
-| `L` / `H` | Show / hide the player window (for signing in) |
+| `L` | Sign in: copy your YouTube session from your browser |
+| `W` / `H` | Show / hide the player window (for diagnosing the page) |
 | `q` | Quit the client, leave the daemon playing |
 | `Q` | Quit and stop the daemon (asks first) |
 

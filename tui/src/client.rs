@@ -1,8 +1,4 @@
-//! Background HTTP worker.
-//!
-//! All daemon traffic happens on its own thread so a slow or dead daemon can
-//! never stall the render loop. The interface sends [`Command`]s and drains
-//! [`Event`]s; it never blocks on the network.
+//! Background HTTP worker: all daemon traffic runs on its own thread so a slow or dead daemon can never stall the render loop, and the interface only sends [`Command`]s and drains [`Event`]s.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::time::{Duration, Instant};
@@ -11,10 +7,19 @@ use serde::Deserialize;
 
 use crate::daemon::BASE_URL;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(400);
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(3000);
-const COMMAND_QUEUE_CAPACITY: usize = 8;
+const COMMAND_QUEUE_CAPACITY: usize = 64;
 const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a burst of seek keys is collected before one seek is sent, because every `seekTo` re-buffers the stream and ten held-down presses would be ten stalls; deltas compose, so the burst becomes one seek.
+const SEEK_DEBOUNCE: Duration = Duration::from_millis(140);
+
+/// The same for volume, which is cheap on the page but still not worth one request per key repeat.
+const VOLUME_DEBOUNCE: Duration = Duration::from_millis(60);
+
+/// How long to let the page apply a command before reading state back.
+const SETTLE: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -63,6 +68,7 @@ pub enum Command {
     Volume { delta: i64 },
     ShowWindow,
     HideWindow,
+    SignIn,
     StopDaemon,
 }
 
@@ -74,6 +80,8 @@ pub enum Event {
     Unreachable(String),
     /// A command failed. Shown on the status line.
     Failed(String),
+    /// Something worth saying that is not a failure.
+    Notice(String),
     DaemonStopped(String),
     DaemonStopFailed(String),
 }
@@ -104,9 +112,7 @@ impl Client {
         if matches!(command, Command::StopDaemon) {
             let _ = self.stop.try_send(());
         } else {
-            // Key repeat can produce commands faster than HTTP can settle them.
-            // A bounded queue drops excess repeats instead of replaying stale
-            // volume or seek changes long after the key was released.
+            // The worker folds relative commands together rather than dropping them, so a held-down key lands where the user aimed.
             let _ = self.commands.try_send(command);
         }
     }
@@ -118,6 +124,10 @@ impl Client {
 
 fn worker(commands: Receiver<Command>, stop: Receiver<()>, events: Sender<Event>) {
     let mut next_poll = Instant::now();
+    // Relative changes waiting to be sent as one, and when to send them.
+    let mut seek = Pending::new(SEEK_DEBOUNCE);
+    let mut volume = Pending::new(VOLUME_DEBOUNCE);
+
     loop {
         if stop.try_recv().is_ok() {
             match crate::daemon::stop() {
@@ -132,28 +142,83 @@ fn worker(commands: Receiver<Command>, stop: Receiver<()>, events: Sender<Event>
             return;
         }
 
-        let wait = next_poll
-            .saturating_duration_since(Instant::now())
+        // Wake for whichever comes first: the next poll, a debounce expiring, or the stop check.
+        let now = Instant::now();
+        let mut wait = next_poll
+            .saturating_duration_since(now)
             .min(STOP_CHECK_INTERVAL);
+        for due in [seek.due, volume.due].into_iter().flatten() {
+            wait = wait.min(due.saturating_duration_since(now));
+        }
+
         match commands.recv_timeout(wait) {
+            Ok(Command::Seek { delta }) => seek.add(delta),
+            Ok(Command::Volume { delta }) => volume.add(delta),
+            // Sign-in reads a keychain and copies a database, far too slow to hold up polling and unordered with respect to the page anyway.
+            Ok(Command::SignIn) => {
+                let events = events.clone();
+                std::thread::spawn(move || {
+                    let _ = events.send(match sign_in() {
+                        Ok(message) => Event::Notice(message),
+                        Err(message) => Event::Failed(message),
+                    });
+                });
+            }
             Ok(command) => {
-                match dispatch(&command) {
-                    Err(message) => {
-                        let _ = events.send(Event::Failed(message));
-                    }
-                    Ok(()) => {}
-                }
-                // Reflect the result promptly rather than waiting out the poll.
-                next_poll = Instant::now();
+                run(&command, &events);
+                next_poll = Instant::now() + SETTLE;
             }
-            Err(RecvTimeoutError::Timeout) => {
-                if Instant::now() >= next_poll {
-                    poll(&events);
-                    next_poll = Instant::now() + POLL_INTERVAL;
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
+
+        if let Some(delta) = seek.take_if_due() {
+            run(&Command::Seek { delta }, &events);
+            next_poll = Instant::now() + SETTLE;
+        }
+        if let Some(delta) = volume.take_if_due() {
+            run(&Command::Volume { delta }, &events);
+            next_poll = Instant::now() + SETTLE;
+        }
+
+        if Instant::now() >= next_poll {
+            poll(&events);
+            next_poll = Instant::now() + POLL_INTERVAL;
+        }
+    }
+}
+
+/// A relative change accumulated across a burst of key repeats.
+struct Pending {
+    total: i64,
+    due: Option<Instant>,
+    debounce: Duration,
+}
+
+impl Pending {
+    fn new(debounce: Duration) -> Self {
+        Self { total: 0, due: None, debounce }
+    }
+
+    fn add(&mut self, delta: i64) {
+        self.total += delta;
+        // Each further press pushes the deadline out, so the request goes once the user stops.
+        self.due = Some(Instant::now() + self.debounce);
+    }
+
+    fn take_if_due(&mut self) -> Option<i64> {
+        if self.due.is_none_or(|due| Instant::now() < due) {
+            return None;
+        }
+        self.due = None;
+        // A burst that cancels itself out (right then left) needs no request.
+        Some(std::mem::take(&mut self.total)).filter(|total| *total != 0)
+    }
+}
+
+fn run(command: &Command, events: &Sender<Event>) {
+    if let Err(message) = dispatch(command) {
+        let _ = events.send(Event::Failed(message));
     }
 }
 
@@ -166,8 +231,37 @@ fn dispatch(command: &Command) -> Result<(), String> {
         Command::Volume { delta } => post("/volume", serde_json::json!({ "delta": delta })),
         Command::ShowWindow => post("/show-window", serde_json::json!({})),
         Command::HideWindow => post("/hide-window", serde_json::json!({})),
+        Command::SignIn => sign_in().map(|_| ()),
         Command::StopDaemon => crate::daemon::stop().map(|_| ()),
     }
+}
+
+/// Hands the player a session from the user's browser, opening YouTube Music there when none is found, which is the ordinary first-time case rather than a failure.
+pub fn sign_in() -> Result<String, String> {
+    const YTM: &str = "https://music.youtube.com";
+
+    let session = match crate::cookies::find_session() {
+        Ok(session) => session,
+        Err(reason) => {
+            crate::cookies::open_in_browser(YTM)
+                .map_err(|problem| format!("{reason}; {problem}"))?;
+            return Err(format!(
+                "{reason}. Opened YouTube Music in your browser - sign in there, then press L again"
+            ));
+        }
+    };
+
+    let count = session.cookies.len();
+    let cookies: Vec<_> = session
+        .cookies
+        .iter()
+        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .collect();
+    post("/cookies", serde_json::json!({ "cookies": cookies }))?;
+    Ok(format!(
+        "Imported {count} cookies from {} - reloading YouTube Music",
+        session.browser
+    ))
 }
 
 fn poll(events: &Sender<Event>) {
@@ -209,8 +303,7 @@ fn post(path: &str, body: serde_json::Value) -> Result<(), String> {
 
 fn describe(error: ureq::Error) -> String {
     match error {
-        // The daemon answers with {"ok":false,"error":"..."} on failure; surface
-        // that instead of a bare status code.
+        // The daemon answers with {"ok":false,"error":"..."} on failure; surface that, not a bare status code.
         ureq::Error::Status(code, response) => match response.into_json::<serde_json::Value>() {
             Ok(body) => body
                 .get("error")

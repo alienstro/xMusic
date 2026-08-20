@@ -1,17 +1,4 @@
-// Injected into music.youtube.com on every document load.
-//
-// Every DOM path and player method used here was verified against a live
-// music.youtube.com session on 2026-08-20; see docs/verified-ytm-contract.md for
-// the probe results. Three findings shape this file:
-//
-//   1. Search goes through YT Music's own InnerTube endpoint, not the rendered
-//      DOM. Same-origin fetch, no navigation, so audio never stops.
-//   2. Starting a track goes through `ytmusic-app.resolveCommand`. A plain
-//      `location.href` assignment reloads the page and kills playback;
-//      `movie_player.loadVideoById` avoids the reload but desyncs YT Music's
-//      queue (the player bar keeps showing the previous track).
-//   3. Play state comes from `getPlayerState()`. The `aria-label` on
-//      `#play-pause-button` is null, so reading it would report "paused" forever.
+// Injected into music.youtube.com on every load; every DOM path and player method here was verified against a live session, so search goes through InnerTube rather than the DOM, playback starts through `resolveCommand`, and play state comes from `getPlayerState()`. See docs/verified-ytm-contract.md.
 (() => {
   'use strict';
   if (window.__xmInstalled) return;
@@ -20,7 +7,8 @@
   const ORIGIN = 'https://music.youtube.com';
   // Search filter restricting results to songs. Verified working.
   const SONGS_FILTER = 'EgWKAQIIAWoKEAoQCRADEAQQBQ%3D%3D';
-  const STATE_POLL_MS = 500;
+  // A fallback, not the real cadence: a hidden WKWebView throttles timers to about a second, so the daemon drives __xmReport() from a Rust timer instead.
+  const STATE_POLL_MS = 1000;
   const SEARCH_TIMEOUT_MS = 12_000;
 
   // getPlayerState() return values.
@@ -41,8 +29,7 @@
       return Promise.reject(new Error('Tauri IPC unavailable'));
     }
     return tauri.core.invoke(command, args).catch((error) => {
-      // Recorded rather than only logged: the webview has no visible console,
-      // so GET /diagnose is the only way to see why IPC is failing.
+      // Recorded, not just logged: the webview has no visible console, so GET /diagnose is the only way to see IPC failing.
       window.__xmLastError = `${command}: ${error && error.message || error}`;
       throw error;
     });
@@ -53,9 +40,7 @@
   function readState() {
     const p = player();
     if (!p || typeof p.getPlayerState !== 'function') {
-      // Either the page is still booting, or YT Music served a page without its
-      // player at all - which is what happens when it doesn't recognise the
-      // user agent. See the user_agent() call in main.rs.
+      // Either the page is booting, or YT Music served no player at all because it did not recognise the user agent; see user_agent() in main.rs.
       const diagnostic = [
         `url=${location.href}`,
         `title=${JSON.stringify(document.title)}`,
@@ -77,8 +62,7 @@
       videoId: data.video_id || '',
       title: data.title || '',
       artist: data.author || '',
-      // Richer than `author`: "Radiohead • OK Computer • 1997". Cosmetic only,
-      // so a selector change here degrades the label instead of breaking state.
+      // Richer than `author` and cosmetic only, so a selector change degrades the label rather than breaking state.
       byline: bar ? bar.textContent.trim() : '',
       diagnostic: '',
       isPlaying: state === PLAYING,
@@ -91,16 +75,17 @@
     };
   }
 
-  setInterval(() => {
+  function report() {
     invoke('report_state', { state: readState() }).catch(() => {});
-  }, STATE_POLL_MS);
+  }
+
+  // Called by the daemon's state pump and after every control action, so a change shows up at once rather than on the next tick.
+  window.__xmReport = report;
+  setInterval(report, STATE_POLL_MS);
 
   // ------------------------------------------------------------- innertube ----
 
-  // Google signs its own API calls with a SHA-1 over
-  // "<timestamp> <cookie> <origin>". The scheme name and the cookie have to
-  // match: SAPISID pairs with SAPISIDHASH, __Secure-3PAPISID with
-  // SAPISID3PHASH. Pairing them wrongly gets the request rejected.
+  // Google signs API calls with a SHA-1 over "<timestamp> <cookie> <origin>", and the scheme must match the cookie it was derived from or the request is rejected.
   const AUTH_COOKIES = [
     ['SAPISID', 'SAPISIDHASH'],
     ['__Secure-3PAPISID', 'SAPISID3PHASH'],
@@ -159,9 +144,7 @@
         window.__xmAuth = `signed (${auth.split(' ')[0]})`;
         return signed.json();
       }
-      // Signing is what makes results personalised, but an unsigned search
-      // still works. Falling back keeps a signed-in user from ending up worse
-      // off than a signed-out one when the signature is refused.
+      // Signing personalises results but an unsigned search still works, so falling back keeps a refused signature from leaving a signed-in user worse off than a signed-out one.
       window.__xmAuth = `signed request refused (HTTP ${signed.status}), retried unsigned`;
     } else {
       window.__xmAuth = 'unsigned (no auth cookie)';
@@ -194,9 +177,7 @@
               ?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId;
           if (!videoId) continue;
 
-          // Second column is "artist • album • duration", with the separators
-          // arriving as their own runs. Locate the duration by shape rather than
-          // by position: albums are omitted for singles, shifting the indices.
+          // The second column is "artist • album • duration", so find the duration by shape: singles omit the album and shift every index.
           const meta = columnRuns(item.flexColumns?.[1]).filter((t) => t.trim() !== '•');
           const durationAt = meta.findIndex((t) => DURATION_RE.test(t));
           const rest = meta.filter((_, i) => i !== durationAt);
@@ -214,8 +195,7 @@
     return results;
   }
 
-  // `seq` is echoed back so the daemon can discard results from a search the
-  // user has already replaced.
+  // `seq` is echoed back so the daemon can discard results for a search the user has already replaced.
   window.__xmSearch = async (seq, query) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
@@ -250,8 +230,7 @@
     return null;
   }
 
-  // Each of these returns null on success or a sentence explaining why not, so
-  // the daemon can pass a real reason back to whoever asked.
+  // Each returns null on success or a sentence explaining why not, so the daemon can pass a real reason back.
   function play(videoId) {
     const a = app();
     if (a && typeof a.resolveCommand === 'function') {
@@ -266,8 +245,7 @@
   async function transport(action) {
     const p = player();
     if (!p) return 'the player has not finished loading';
-    // Every transport control is a no-op with an empty player, and a no-op that
-    // reports success is indistinguishable from a broken button.
+    // Transport controls are no-ops on an empty player, and a no-op reporting success looks exactly like a broken button.
     if (!loaded(p)) return 'nothing is loaded — search for a song first';
     switch (action) {
       case 'play':
@@ -280,14 +258,11 @@
         if (p.getPlayerState() === PLAYING) p.pauseVideo();
         else p.playVideo();
         return null;
-      // The queue belongs to YouTube Music, not to the raw player:
-      // getPlaylist() returns null, and nextVideo() would leave the player bar
-      // behind. Click the real buttons instead.
+      // The queue belongs to YouTube Music, not the raw player, so click the real buttons: getPlaylist() is null and nextVideo() leaves the player bar behind.
       case 'next':
         return click('.next-button');
       case 'prev':
-        // YouTube Music restarts the current track rather than stepping back
-        // once you are a few seconds in. Rewind first so "prev" means "prev".
+        // A few seconds in, YouTube Music restarts the track instead of stepping back, so rewind first and let "prev" mean prev.
         if ((p.getCurrentTime() || 0) > 3) {
           p.seekTo(0, true);
           await sleep(150);
@@ -316,9 +291,27 @@
     return null;
   }
 
-  // Single entry point for every control call. `id` is echoed back so the
-  // waiting HTTP request learns what actually happened instead of being told
-  // that queuing the script counted as success.
+  // These lose the HttpOnly flag their browser set, which only stops scripts reading a cookie and has no bearing on whether Google accepts one.
+  function adopt(cookies) {
+    if (!Array.isArray(cookies) || cookies.length === 0) {
+      return 'no cookies were supplied';
+    }
+    const attributes = '; domain=.youtube.com; path=/; Secure; SameSite=None';
+    let written = 0;
+    for (const cookie of cookies) {
+      if (!cookie || !cookie.name) continue;
+      document.cookie = `${cookie.name}=${cookie.value || ''}${attributes}`;
+      written += 1;
+    }
+    // Setting a cookie fails silently if the page rejects the attributes, so confirm one survived rather than reporting success on faith.
+    if (!document.cookie.includes('SAPISID')) {
+      return 'the page would not keep the imported cookies';
+    }
+    log(`adopted ${written} cookies`);
+    return null;
+  }
+
+  // Single entry point for every control call; `id` is echoed back so the waiting request learns what happened rather than that a script was queued.
   window.__xmDispatch = async (id, action, args) => {
     let error = null;
     try {
@@ -335,6 +328,9 @@
         case 'volume':
           error = volume(args.value, args.relative);
           break;
+        case 'adopt_cookies':
+          error = adopt(args.cookies);
+          break;
         default:
           error = `unknown action "${action}"`;
       }
@@ -342,6 +338,8 @@
       error = String((thrown && thrown.message) || thrown);
     }
     if (error) log(`${action} failed: ${error}`);
+    // Whoever is waiting on this call is about to redraw, and should redraw with the state it just produced.
+    report();
     invoke('report_command', { id, ok: !error, error }).catch(() => {});
   };
 
