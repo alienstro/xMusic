@@ -95,10 +95,18 @@ const BROWSERS: &[Browser] = &[
 /// Profile directories to search, in the order a single-profile user would expect; a session in "Profile 2" is still a session.
 const PROFILES: &[&str] = &["Default", "Profile 1", "Profile 2", "Profile 3"];
 
+/// One cookie, with the expiry it had in the browser it came from.
+pub struct Cookie {
+    pub name: String,
+    pub value: String,
+    /// Unix seconds, or None for a cookie the browser held only for its session.
+    pub expires: Option<i64>,
+}
+
 pub struct Session {
     /// Which browser it came from, so the client can say so.
     pub browser: &'static str,
-    pub cookies: Vec<(String, String)>,
+    pub cookies: Vec<Cookie>,
 }
 
 /// Finds a signed-in YouTube session in whichever supported browser has one, distinguishing "no browser to read" from "found, but not signed in" because only the second is worth acting on.
@@ -122,7 +130,7 @@ pub fn find_session() -> Result<Session, String> {
             };
             if PROOF_OF_LOGIN
                 .iter()
-                .any(|name| cookies.iter().any(|(cookie, _)| cookie == name))
+                .any(|name| cookies.iter().any(|cookie| cookie.name == *name))
             {
                 return Ok(Session { browser: browser.name, cookies });
             }
@@ -149,20 +157,34 @@ fn database_path(browser: &Browser, profile: &str) -> Option<PathBuf> {
     )
 }
 
-fn read_cookies(browser: &Browser, database: &PathBuf) -> Result<Vec<(String, String)>, String> {
+fn read_cookies(browser: &Browser, database: &PathBuf) -> Result<Vec<Cookie>, String> {
     let key = decryption_key(browser)?;
     let rows = query(database)?;
 
     let mut cookies = Vec::new();
-    for (name, encrypted) in rows {
+    for (name, expires_utc, encrypted) in rows {
         if !WANTED.contains(&name.as_str()) {
             continue;
         }
         if let Ok(value) = decrypt(&encrypted, &key) {
-            cookies.push((name, value));
+            cookies.push(Cookie { name, value, expires: unix_expiry(expires_utc) });
         }
     }
     Ok(cookies)
+}
+
+/// Converts Chromium's expiry to Unix seconds, which is what a cookie header wants.
+///
+/// Chromium counts microseconds from 1601-01-01, and writes zero for a cookie it
+/// only holds for the session. Carrying the real expiry across is what makes an
+/// imported session outlive the daemon that imported it: a cookie set without one
+/// is a session cookie, and WebKit discards those when the process ends.
+fn unix_expiry(expires_utc: i64) -> Option<i64> {
+    const EPOCH_DIFFERENCE: i64 = 11_644_473_600;
+    match expires_utc {
+        0 => None,
+        microseconds => Some(microseconds / 1_000_000 - EPOCH_DIFFERENCE),
+    }
 }
 
 /// Derives the AES key from the browser's keychain secret, which is the step that makes macOS ask permission and the reason sign-in is a deliberate keypress.
@@ -193,7 +215,7 @@ fn decryption_key(browser: &Browser) -> Result<[u8; KEY_LENGTH], String> {
 }
 
 /// Reads the rows through sqlite3(1) rather than linking a SQL engine, from a copy: a running browser holds the file open, so reading in place gets a lock error or an answer predating the sign-in.
-fn query(database: &PathBuf) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn query(database: &PathBuf) -> Result<Vec<(String, i64, Vec<u8>)>, String> {
     let scratch = std::env::temp_dir().join(format!("xmusic-cookies-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
@@ -210,7 +232,8 @@ fn query(database: &PathBuf) -> Result<Vec<(String, Vec<u8>)>, String> {
         .arg("\n")
         .arg(&target)
         .arg(format!(
-            "select name || ' ' || hex(encrypted_value) from cookies where host_key = '{DOMAIN}';"
+            "select name || ' ' || expires_utc || ' ' || hex(encrypted_value) \
+             from cookies where host_key = '{DOMAIN}';"
         ))
         .output()
         .map_err(|error| format!("cannot run sqlite3(1): {error}"))?;
@@ -224,8 +247,12 @@ fn query(database: &PathBuf) -> Result<Vec<(String, Vec<u8>)>, String> {
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text
         .lines()
-        .filter_map(|line| line.split_once(' '))
-        .filter_map(|(name, hex)| Some((name.to_string(), from_hex(hex)?)))
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            let name = fields.next()?;
+            let expires = fields.next()?.parse().ok()?;
+            Some((name.to_string(), expires, from_hex(fields.next()?)?))
+        })
         .collect())
 }
 

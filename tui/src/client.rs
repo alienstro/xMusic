@@ -255,7 +255,13 @@ pub fn sign_in() -> Result<String, String> {
     let cookies: Vec<_> = session
         .cookies
         .iter()
-        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .map(|cookie| {
+            serde_json::json!({
+                "name": cookie.name,
+                "value": cookie.value,
+                "expires": cookie.expires,
+            })
+        })
         .collect();
     post("/cookies", serde_json::json!({ "cookies": cookies }))?;
     Ok(format!(

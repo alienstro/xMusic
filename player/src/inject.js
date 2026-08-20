@@ -11,6 +11,11 @@
   const STATE_POLL_MS = 1000;
   const SEARCH_TIMEOUT_MS = 12_000;
 
+  // Chrome caps a cookie at 400 days and shortens anything longer, so asking for
+  // more buys nothing; the floor keeps an already-expired value persistent.
+  const MAX_COOKIE_AGE = 400 * 24 * 60 * 60;
+  const MIN_COOKIE_AGE = 30 * 24 * 60 * 60;
+
   // getPlayerState() return values.
   const PLAYING = 1;
   const BUFFERING = 3;
@@ -296,11 +301,20 @@
     if (!Array.isArray(cookies) || cookies.length === 0) {
       return 'no cookies were supplied';
     }
-    const attributes = '; domain=.youtube.com; path=/; Secure; SameSite=None';
+    // A cookie set without a lifetime is a session cookie, and WebKit drops
+    // those when the process ends, so an imported session would not survive a
+    // single restart of the daemon. Carry the browser's own expiry across.
+    const now = Date.now() / 1000;
     let written = 0;
     for (const cookie of cookies) {
       if (!cookie || !cookie.name) continue;
-      document.cookie = `${cookie.name}=${cookie.value || ''}${attributes}`;
+      const remaining = cookie.expires ? cookie.expires - now : 0;
+      // Google rotates most of these itself, so an expiry it has already passed
+      // is no reason to import a cookie as one that dies on exit.
+      const age = Math.round(Math.min(MAX_COOKIE_AGE, Math.max(MIN_COOKIE_AGE, remaining)));
+      document.cookie =
+        `${cookie.name}=${cookie.value || ''}; domain=.youtube.com; path=/` +
+        `; max-age=${age}; Secure; SameSite=None`;
       written += 1;
     }
     // Setting a cookie fails silently if the page rejects the attributes, so confirm one survived rather than reporting success on faith.
