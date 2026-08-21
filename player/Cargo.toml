@@ -10,6 +10,7 @@ description = "Hidden-webview YouTube Music playback daemon with a localhost con
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+xmusic-protocol.workspace = true
 tauri = { version = "2" }
 getrandom.workspace = true
 serde.workspace = true

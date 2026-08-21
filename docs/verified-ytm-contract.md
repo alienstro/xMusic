@@ -100,7 +100,7 @@ Application commands need their own permission file, `player/permissions/*.toml`
 
     [[permission]]
     identifier = "allow-reporting"
-    commands.allow = ["report_state", "report_search_results", "report_command"]
+    commands.allow = ["report_state", "report_list", "report_command"]
 
 referenced from the capability WITHOUT a namespace prefix ("allow-reporting",
 not "<plugin>:allow-reporting" - the prefix form is for plugins only). After
@@ -198,3 +198,143 @@ case and is now reported rather than silently succeeding.
 
 Also note the state snapshot is up to 500ms stale, since the page reports on a
 500ms timer. Reading /state immediately after a POST can show the old value.
+
+## Library feeds, playlists and likes (verified 2026-08-21)
+
+Verified against a live, signed-in `music.youtube.com` session in a real desktop
+Chrome, calling InnerTube from the page with the same signing scheme `inject.js`
+uses. Every browseId, container path and endpoint below was executed and its
+response read; none of it is inferred.
+
+### Library feeds
+
+All four return HTTP 200 and share one container:
+
+    contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content
+      .sectionListRenderer.contents[]
+
+| Feed | browseId | Shelf under `contents[]` |
+|---|---|---|
+| Liked | `FEmusic_liked_videos` | `musicShelfRenderer` |
+| Playlists | `FEmusic_liked_playlists` | `gridRenderer` |
+| Albums | `FEmusic_liked_albums` | `gridRenderer` |
+| History | `FEmusic_history` | `musicShelfRenderer`, one per date group |
+
+History returns several shelves in one response - "Today", "Yesterday", "This
+week", "Last week", "August 2026" - so a feed is a list of shelves, not one
+shelf. All of them must be walked or most of the history is lost.
+
+### List items differ from search items
+
+Both are `musicResponsiveListItemRenderer`, but the columns are laid out
+differently, and a parser written for search alone drops the album and the
+duration of every library row:
+
+| | Search | Library / playlist / album |
+|---|---|---|
+| `flexColumns[0]` | title | title |
+| `flexColumns[1]` | `["Artist"," • ","Album"," • ","3:59"]` | `["Artist"]` |
+| `flexColumns[2]` | `"14M plays"` | `["Album"]` (a play count on an album page) |
+| `fixedColumns[0]` | absent | `["3:47"]`, the duration |
+
+So the presence of `fixedColumns` is what distinguishes the two shapes, and it
+is read from the item rather than from which feed was asked for.
+
+Album tracks carry an empty `flexColumns[1]`: the artist is on the album header,
+not on each row. `flexColumns[2]` there is a play count.
+
+Common to both shapes:
+  .playlistItemData.videoId
+  .overlay.musicItemThumbnailOverlayRenderer.content
+     .musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint.videoId
+  .thumbnail.musicThumbnailRenderer.thumbnail.thumbnails[-1].url
+
+The first row of `FEmusic_liked_videos` is a "Shuffle all" pseudo-row with one
+flex column and no `playlistItemData`. Skipping items without a videoId, which
+the existing parser already does, is what handles it.
+
+### Like state arrives with the row
+
+    .menu.menuRenderer.topLevelButtons[0].likeButtonRenderer.likeStatus
+       -> "LIKE" | "DISLIKE" | "INDIFFERENT"
+
+Also present beside it: `likesAllowed`, and ready-made `serviceEndpoints[]`
+each holding a `likeEndpoint` with `{ status, target: { videoId } }`.
+
+Search responses do NOT carry `topLevelButtons`, so a search row has no like
+state at all and must show none rather than showing "not liked".
+
+For the now-playing track the state is in the DOM, on the player bar:
+
+    document.querySelector('ytmusic-player-bar ytmusic-like-button-renderer')
+      attribute `like-status`  -> "INDIFFERENT"
+      .data.likeStatus         -> "INDIFFERENT"
+      .data.target.videoId     -> "bdXPhRj10jQ"
+
+### Grid items
+
+`gridRenderer.items[].musicTwoRowItemRenderer`:
+
+    .title.runs                                  -> "Jpop"
+    .subtitle.runs                               -> "Robinx Prhynz Aquino • 3 tracks"
+                                                 -> "Single • あれくん • 2023" (album)
+    .navigationEndpoint.browseEndpoint.browseId  -> "VLPLZTkI3dRKoHc" (playlist)
+                                                 -> "MPREb_3RVL6e1Jcgy" (album)
+    .navigationEndpoint.browseEndpoint.browseEndpointContextSupportedConfigs
+       .browseEndpointContextMusicConfig.pageType
+                                                 -> MUSIC_PAGE_TYPE_PLAYLIST / _ALBUM
+    .thumbnailRenderer.musicThumbnailRenderer.thumbnail.thumbnails[-1].url
+
+A playlist browseId is ALREADY `VL`-prefixed here; prefixing it again produces a
+dead id. An album browseId is used exactly as it arrives.
+
+The first card of `FEmusic_liked_playlists` is a "New playlist" button carrying
+`createPlaylistEndpoint` instead of `browseEndpoint`. Items with no
+`browseEndpoint.browseId` must be skipped.
+
+### Drilling into a playlist or an album
+
+Both are a plain `browse` on the id above, and both answer in a DIFFERENT
+container from the library feeds - two columns, not one:
+
+    contents.twoColumnBrowseResultsRenderer.secondaryContents
+      .sectionListRenderer.contents[]
+        .musicPlaylistShelfRenderer   (playlist; also carries .playlistId)
+        .musicShelfRenderer           (album)
+
+Their items are `musicResponsiveListItemRenderer` in the library shape above.
+
+### Continuations are the old query-string form
+
+Not `continuationItemRenderer`. The token is on the shelf:
+
+    musicShelfRenderer.continuations[0].nextContinuationData.continuation
+    gridRenderer.continuations[0].nextContinuationData.continuation
+
+and is resent as query parameters on the same endpoint, with the ordinary body:
+
+    POST /youtubei/v1/browse?key=…&prettyPrint=false
+         &ctoken=<token>&continuation=<token>&type=next
+
+The reply is shaped differently again - no `contents`, no tabs:
+
+    continuationContents.musicShelfContinuation.contents[]   (+ .continuations)
+    continuationContents.gridContinuation.items[]            (+ .continuations)
+
+Verified: one continuation on `FEmusic_liked_videos` returned 42 further rows
+and a further token.
+
+### Likes
+
+    POST /youtubei/v1/like/like        body { target: { videoId } }  -> 200
+    POST /youtubei/v1/like/removelike  body { target: { videoId } }  -> 200
+
+Both answer `{ responseContext, actions }`. Verified end to end on a real
+account: a track reading `INDIFFERENT` was liked, re-read as `LIKE` in a fresh
+`FEmusic_history` browse, then unliked and re-read as `INDIFFERENT` again. The
+account was left exactly as it was found.
+
+A refusal is an HTTP error, not a quiet no-op: `like/like` on a nonexistent
+videoId answered HTTP 404 with `{"error":{"code":404,"message":"Requested entity
+was not found."}}`. So a like that fails can be detected and the optimistic
+heart reverted.

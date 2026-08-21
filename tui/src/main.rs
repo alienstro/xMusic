@@ -1,24 +1,27 @@
 //! xmusic: terminal client for the xmusic-player daemon (crate `xmusic-tui`).
 
-mod app;
-mod client;
-mod cookies;
-mod daemon;
-mod ui;
+mod adapters;
+mod effects;
+mod model;
+mod panes;
+mod update;
+mod view;
 
 use std::io::{self, Write};
 use std::time::Duration;
 
 use crossterm::event::{self, Event as TermEvent, KeyEventKind};
 
-use app::App;
-use client::Client;
+use adapters::daemon_process as daemon;
+use effects::Runner;
+use model::Model;
+use update::{update, Message};
 
 /// How long the render loop waits for a key before redrawing anyway, and so the upper bound on how stale the progress meter looks.
 const TICK: Duration = Duration::from_millis(80);
 
 const USAGE: &str = "\
-xmusic - terminal client for YouTube Music
+xMusic - terminal client for YouTube Music
 
 USAGE:
     xmusic [OPTIONS]
@@ -35,7 +38,7 @@ OPTIONS:
     --daemon-status   Report whether the daemon is running, and exit
     -h, --help        Show this message
 
-Google will not accept a sign-in from an embedded webview, so xmusic never
+Google will not accept a sign-in from an embedded webview, so xMusic never
 asks for your password. Sign in with your normal browser instead, then press L
 (or run --login) to copy that session into the player.
 
@@ -100,7 +103,7 @@ fn main() -> io::Result<()> {
                     eprintln!("xmusic: {message}");
                     std::process::exit(1);
                 }
-                return match client::sign_in() {
+                return match effects::sign_in() {
                     Ok(message) => {
                         println!("xmusic: {message}");
                         Ok(())
@@ -204,25 +207,35 @@ fn prepare_daemon(no_spawn: bool) -> Result<String, String> {
     }
 }
 
+/// The loop: messages in, one model, effects out, one drawing of what is left.
+///
+/// Nothing here decides anything. Terminal events and the runner's replies both
+/// become messages, `update` is the only thing that changes the model, and every
+/// effect it returns goes straight back out to the runner.
 fn run(terminal: &mut ratatui::DefaultTerminal, opening: String) -> io::Result<()> {
-    let mut app = App::new(Client::spawn());
-    app.status = opening;
+    let runner = Runner::spawn();
+    let mut model = Model::default();
+    model.status = opening;
 
-    while !app.should_quit {
-        app.absorb_events();
-        terminal.draw(|frame| ui::draw(frame, &mut app))?;
+    while !model.should_quit {
+        for message in runner.drain() {
+            for effect in update(&mut model, message) {
+                runner.send(effect);
+            }
+        }
+        terminal.draw(|frame| view::draw(frame, &mut model))?;
 
         if event::poll(TICK)? {
             // Drain everything queued rather than one key per frame, or a held-down arrow leaves the interface running behind the keyboard.
             loop {
-                match event::read()? {
-                    TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                        app.handle_key(key.code, key.modifiers)
+                if let TermEvent::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        for effect in update(&mut model, Message::Key(key.code, key.modifiers)) {
+                            runner.send(effect);
+                        }
                     }
-                    // Redraw happens next iteration regardless; nothing to do.
-                    _ => {}
                 }
-                if app.should_quit || !event::poll(Duration::ZERO)? {
+                if model.should_quit || !event::poll(Duration::ZERO)? {
                     break;
                 }
             }

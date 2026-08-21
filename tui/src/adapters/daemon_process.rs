@@ -6,18 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use xmusic_protocol::{HealthResponse, AUTH_HEADER, BASE_URL, PROTOCOL_VERSION};
 
-/// Must match `BIND_ADDR` in the player crate.
-pub const BASE_URL: &str = "http://127.0.0.1:13723";
-pub const AUTH_HEADER: &str = "X-Xmusic-Token";
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const PID_FILE: &str = "daemon.pid";
 const TOKEN_FILE: &str = "control.token";
-const DAEMON_BINARY: &str = "xmusic-player";
-const PROTOCOL_VERSION: u32 = 1;
+const DAEMON_BINARY: &str = xmusic_protocol::SERVICE_NAME;
 
 /// Where macOS lets the daemon leave things, scanned by name prefix because an unbundled build names its files after the executable and a bundled one after the identifier.
 const LIBRARY_DIRS: &[&str] = &[
@@ -41,22 +37,12 @@ pub enum Status {
     Unrecognized(String),
 }
 
-#[derive(Deserialize)]
-struct Health {
-    ok: bool,
-    #[serde(default)]
-    service: Option<String>,
-    version: String,
-    #[serde(default)]
-    protocol: Option<u32>,
-}
-
 pub fn status() -> Status {
     match ureq::get(&format!("{BASE_URL}/health"))
         .timeout(PROBE_TIMEOUT)
         .call()
     {
-        Ok(response) => match response.into_json::<Health>() {
+        Ok(response) => match response.into_json::<HealthResponse>() {
             Ok(health)
                 if health.ok
                     && health
