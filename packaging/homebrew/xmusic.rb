@@ -31,16 +31,17 @@ class Xmusic < Formula
       keeps playing after you quit the interface, and survives closing the
       terminal. To stop it:
 
-        xmusic --kill-daemon
+        xmusic stop
 
       Search and playback work without signing in. Google will not accept a
       sign-in from an embedded webview, so to use your own account you sign in
       with your normal browser and xmusic copies that session across: press L
-      (or run `xmusic --login`), sign in when your browser opens, then press L
+      (or run `xmusic login`), sign in when your browser opens, then press L
       again. macOS will ask once for keychain permission, which is what lets
       xmusic decrypt the browser's cookies.
 
-        xmusic --uninstall    # stop the daemon and delete its data
+        xmusic uninstall      # stop the daemon and delete its data
+        xmusic update         # replace both binaries with the newest release
 
       The daemon logs to ~/.xmusic/daemon.log and listens on 127.0.0.1:13723.
     EOS

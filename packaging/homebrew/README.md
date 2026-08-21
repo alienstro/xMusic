@@ -55,6 +55,24 @@ named `homebrew-<name>`: `alienstro/homebrew-tap` becomes `alienstro/tap`.
 
 ## Releasing an update
 
+One command does the whole release, and is the intended route:
+
+```bash
+scripts/release.sh patch          # or minor, major, or as-is
+```
+
+It runs from a clean `main`, bumps the version, commits it, pushes `main`, tags,
+pushes the tag, creates the GitHub release, then rewrites and pushes the tap
+formula — stopping at the first thing that is wrong and asking before it pushes
+anything. `--dry-run` prints every command without running one. Afterwards
+`brew upgrade xmusic` and `xmusic update` both see the new version.
+
+`as-is` releases the version already in `Cargo.toml`, for when the bump landed in
+an earlier commit.
+
+The rest of this section is what that script drives, and what to do by hand when
+a release goes sideways halfway through.
+
 Bump the version with `scripts/bump.sh`, which writes all three files that have
 to agree — the workspace manifest, `player/tauri.conf.json`, and the tarball URL
 in `xmusic.rb`:

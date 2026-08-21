@@ -75,6 +75,12 @@ brew info xmusic
 brew uninstall xmusic
 ```
 
+Or from the client itself, which finds the installer for you:
+
+```bash
+xmusic update
+```
+
 > **Not live yet.** This needs the tap published at `alienstro/homebrew-tap` and
 > a tagged release of this repository. The formula is written and tested — see
 > [`packaging/homebrew/`](packaging/homebrew/) — but until it is pushed, build
@@ -204,7 +210,7 @@ normal browser instead, and xmusic copies that session across:
 3. Press `L` again — xmusic reads the youtube.com cookies from your browser and
    hands them to the player, which reloads as you
 
-Same thing from a shell: `xmusic --login`.
+Same thing from a shell: `xmusic login`.
 
 Brave, Chrome, Edge, Arc, Vivaldi and Chromium are supported. Reading the
 cookies means decrypting them with a key held in your login keychain, so macOS
@@ -213,7 +219,7 @@ arrangement. Only the seventeen cookies that carry a YouTube session are read,
 never the rest of your browsing.
 
 The session then persists in the webview's own cookie store, so it is a one-off.
-`xmusic --uninstall` deletes it again.
+`xmusic uninstall` deletes it again.
 
 ### Leave it, or stop it
 
@@ -231,8 +237,8 @@ When you do want it to stop:
 | Method | Notes |
 |---|---|
 | `Q` in the interface | Confirms first, then stops the daemon and exits |
-| `xmusic --kill-daemon` | From any terminal |
-| `xmusic --restart` | When it is wedged rather than stopped |
+| `xmusic stop` | From any terminal |
+| `xmusic restart` | When it is wedged rather than stopped |
 | `POST /quit` | The underlying authenticated endpoint |
 | `SIGTERM`, then `SIGKILL` | Automatic fallback only while `~/.xmusic/daemon.pid` is locked by a verified `xmusic-player` process |
 
@@ -240,14 +246,74 @@ When you do want it to stop:
 
 ```bash
 xmusic                  # connect, starting the daemon if needed
-xmusic --login          # copy your browser's YouTube session into the player
-xmusic --restart        # stop whatever is there, start fresh, open the interface
-xmusic --no-spawn       # fail instead of starting a daemon
-xmusic --daemon-status  # is it running?
-xmusic --kill-daemon    # stop it
-xmusic --uninstall      # stop the daemon and delete its data (asks first)
-xmusic --help
+xmusic update           # replace both binaries with the newest release
+xmusic login            # copy your browser's YouTube session into the player
+xmusic restart          # stop whatever is there, start fresh, open the interface
+xmusic status           # is it running?
+xmusic stop             # stop it
+xmusic uninstall        # stop the daemon and delete its data (asks first)
+xmusic version
+xmusic help
 ```
+
+Every command is also a flag — `xmusic --update`, `xmusic --login`,
+`xmusic --daemon-status`, `xmusic --kill-daemon` — because that is how they were
+spelled first and scripts already say it that way. Plus one option that is only
+ever an option:
+
+```bash
+xmusic --no-spawn       # fail instead of starting a daemon
+```
+
+### Updating
+
+```bash
+xmusic update           # newest release, however you installed it
+xmusic reinstall        # install again even when nothing is newer
+```
+
+`update` works out what owns the running binary and hands the job to it:
+`brew upgrade --formula xmusic` for a Homebrew install, `cargo install --git …`
+for a cargo one, and for a binary built in a checkout it says so rather than
+guessing. It stops the daemon first, because the client refuses a daemon whose
+version differs from its own and a new client beside an old running daemon is a
+handshake that cannot succeed. Run `xmusic` afterwards to start the new version.
+
+Before doing any of that it asks GitHub for the newest release and stops if you
+already have it, so the common case costs one request rather than a build.
+`xmusic reinstall` (or `xmusic update --force`) skips that stop.
+
+#### From this checkout
+
+`xmusic update` moves you to a published release, which is no help when the
+version you want is the working tree in front of you. That is one command too:
+
+```bash
+scripts/install-local.sh
+```
+
+It builds both binaries, stops the daemon still running the old ones, and
+installs over whatever your `xmusic` currently resolves to — the Homebrew keg it
+came from, or `~/.cargo/bin` — so nothing about your PATH has to change. Add
+`--debug` to skip the release build, or `--to DIR` to choose where it lands.
+
+Installing into a Homebrew keg leaves Homebrew still recording the version it
+installed, so `brew reinstall xmusic` is how you get its own build back.
+
+#### Publishing a release
+
+The other side of the same coin, for whoever maintains this:
+
+```bash
+scripts/release.sh minor          # or patch, major, or as-is
+```
+
+From a clean `main` it bumps the version, commits, pushes `main`, tags, pushes
+the tag, creates the GitHub release, and rewrites and pushes the Homebrew tap
+formula against the new tarball's checksum — asking once before any of it leaves
+the machine, and stopping at the first thing that is wrong. `--dry-run` prints
+the commands without running them. Details in
+[`packaging/homebrew/`](packaging/homebrew/).
 
 ### If something looks wrong
 
