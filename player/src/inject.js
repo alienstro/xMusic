@@ -1,15 +1,43 @@
 // Injected into music.youtube.com on every load; every DOM path and player method here was verified against a live session, so search goes through InnerTube rather than the DOM, playback starts through `resolveCommand`, and play state comes from `getPlayerState()`. See docs/verified-ytm-contract.md.
 (() => {
   'use strict';
+  const ORIGIN = 'https://music.youtube.com';
+  // The daemon parks the webview on a blank document to give the page's memory
+  // back while nothing is playing. None of this applies there: there is no
+  // player, and IPC is granted to this origin alone in any case.
+  if (location.origin !== ORIGIN) return;
   if (window.__xmInstalled) return;
   window.__xmInstalled = true;
-
-  const ORIGIN = 'https://music.youtube.com';
   // Search filter restricting results to songs. Verified working.
   const SONGS_FILTER = 'EgWKAQIIAWoKEAoQCRADEAQQBQ%3D%3D';
   // A fallback, not the real cadence: a hidden WKWebView throttles timers to about a second, so the daemon drives __xmReport() from a Rust timer instead.
   const STATE_POLL_MS = 1000;
   const SEARCH_TIMEOUT_MS = 12_000;
+
+  // A library feed is several requests, not one, so it is given longer than a
+  // search: the page follows its own continuations and answers once.
+  const BROWSE_TIMEOUT_MS = 25_000;
+
+  // How many continuation pages a feed may follow. A library of tens of
+  // thousands of liked songs is truncated rather than loaded forever, and a
+  // truncated feed says so instead of looking complete.
+  const PAGE_CAP = 12;
+
+  // Verified 2026-08-21 against a signed-in account; see docs/verified-ytm-contract.md.
+  const FEEDS = {
+    liked: { browseId: 'FEmusic_liked_videos', label: 'Liked' },
+    playlists: { browseId: 'FEmusic_liked_playlists', label: 'Playlists' },
+    albums: { browseId: 'FEmusic_liked_albums', label: 'Albums' },
+    history: { browseId: 'FEmusic_history', label: 'History' },
+  };
+
+  // How long a track restored after an idle unload is given to load. Shorter
+  // than the daemon's own limit for the same call, so a slow restore is reported
+  // by the page rather than timing out underneath it. Generous because a cold
+  // page has to route to the watch endpoint and pull a stream before there is a
+  // duration to seek within, which was measured taking well over ten seconds.
+  const RESTORE_TIMEOUT_MS = 20_000;
+  const RESTORE_POLL_MS = 100;
 
   // Chrome caps a cookie at 400 days and shortens anything longer, so asking for
   // more buys nothing; the floor keeps an already-expired value persistent.
@@ -27,6 +55,59 @@
   const app = () => document.querySelector('ytmusic-app');
   const cfg = () => (window.ytcfg && window.ytcfg.data_) || {};
 
+  // ------------------------------------------------------------ artwork ----
+
+  // Artwork is the largest slice of this page's memory that is not audio: every
+  // thumbnail fetched is decoded into a bitmap the session then holds on to. The
+  // terminal draws its own artwork from the URLs InnerTube already returns, so
+  // no image this page loads is ever looked at by anyone. A 1x1 transparent GIF
+  // stands in for each one rather than an empty string, because the page's
+  // bindings expect `src` to read back as a URL.
+  const BLANK_IMAGE =
+    'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+  // Replaces a reflected image attribute at the prototype level, which is how
+  // YouTube Music sets thumbnails: through the property, not the markup.
+  function substitute(property, replacement) {
+    const original = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, property);
+    if (!original || !original.set) return;
+    Object.defineProperty(HTMLImageElement.prototype, property, {
+      configurable: true,
+      enumerable: original.enumerable,
+      get() { return original.get.call(this); },
+      set() { original.set.call(this, replacement); },
+    });
+  }
+
+  function blockImages() {
+    substitute('src', BLANK_IMAGE);
+    // srcset is where the responsive thumbnail sets arrive, and it is read back
+    // far less often, so it can simply go empty.
+    substitute('srcset', '');
+
+    // Overridden on images only, never on Element, so nothing else on the page
+    // pays for this on every attribute it sets.
+    const setAttribute = Element.prototype.setAttribute;
+    HTMLImageElement.prototype.setAttribute = function (name, value) {
+      switch (String(name).toLowerCase()) {
+        case 'src': return setAttribute.call(this, name, BLANK_IMAGE);
+        case 'srcset': return setAttribute.call(this, name, '');
+        default: return setAttribute.call(this, name, value);
+      }
+    };
+
+    // CSS backgrounds need no interception: an image a stylesheet has computed
+    // away to `none` is never fetched in the first place.
+    const style = document.createElement('style');
+    style.textContent = '*, *::before, *::after { background-image: none !important; }';
+    const attach = () => (document.head || document.documentElement).appendChild(style);
+    if (document.head || document.documentElement) attach();
+    else document.addEventListener('readystatechange', attach, { once: true });
+  }
+
+  // Set by the daemon from XMUSIC_KEEP_IMAGES; see inject_script() in main.rs.
+  if (!window.__xmKeepImages) blockImages();
+
   function invoke(command, args) {
     const tauri = window.__TAURI__;
     if (!tauri || !tauri.core) {
@@ -42,6 +123,15 @@
 
   // ---------------------------------------------------------------- state ----
 
+  // The now-playing track's like state, which InnerTube does not report with the
+  // player: it is on the player bar's own control. Null while the bar has not
+  // rendered, so an unknown state is never drawn as "not liked".
+  function nowPlayingLike() {
+    const control = document.querySelector('ytmusic-player-bar ytmusic-like-button-renderer');
+    if (!control) return null;
+    return likedFrom(control.data?.likeStatus || control.getAttribute('like-status'));
+  }
+
   function readState() {
     const p = player();
     if (!p || typeof p.getPlayerState !== 'function') {
@@ -55,15 +145,18 @@
         `moviePlayer=${p ? 'partial' : 'no'}`,
         `search=${typeof window.__xmSearch}`,
       ].join(' ');
-      return { ready: false, videoId: '', title: '', artist: '', byline: '',
-               diagnostic, isPlaying: false, isBuffering: false, position: 0,
-               duration: 0, volume: 0, muted: false, loggedIn: !!cfg().LOGGED_IN };
+      return { ready: false, apiReady: !!cfg().INNERTUBE_API_KEY, videoId: '',
+               title: '', artist: '', byline: '', diagnostic, isPlaying: false,
+               isBuffering: false, position: 0, duration: 0, volume: 0,
+               muted: false, loggedIn: !!cfg().LOGGED_IN, liked: null };
     }
     const data = p.getVideoData() || {};
     const state = p.getPlayerState();
     const bar = document.querySelector('.byline.ytmusic-player-bar');
     return {
       ready: true,
+      // The daemon waits on this before searching a page that has come back from an unload: InnerTube needs the key, not the player.
+      apiReady: !!cfg().INNERTUBE_API_KEY,
       videoId: data.video_id || '',
       title: data.title || '',
       artist: data.author || '',
@@ -77,6 +170,7 @@
       volume: Math.round(p.getVolume() || 0),
       muted: typeof p.isMuted === 'function' ? !!p.isMuted() : false,
       loggedIn: !!cfg().LOGGED_IN,
+      liked: nowPlayingLike(),
     };
   }
 
@@ -120,11 +214,19 @@
     return null;
   }
 
-  async function innertube(endpoint, body, signal) {
+  /// One InnerTube call.
+  ///
+  /// `options.params` becomes query string rather than body, which is the only
+  /// form the continuation endpoint accepts. `options.signedOnly` suppresses the
+  /// unsigned retry below, for a call that changes something on the account: an
+  /// unsigned like cannot work, and retrying one only replaces the real refusal
+  /// with a 401 that says nothing about why.
+  async function innertube(endpoint, body, signal, options = {}) {
     const c = cfg();
     if (!c.INNERTUBE_API_KEY) throw new Error('ytcfg not ready');
 
-    const url = `/youtubei/v1/${endpoint}?key=${c.INNERTUBE_API_KEY}&prettyPrint=false`;
+    const query = new URLSearchParams({ key: c.INNERTUBE_API_KEY, prettyPrint: 'false', ...options.params });
+    const url = `/youtubei/v1/${endpoint}?${query}`;
     const payload = JSON.stringify({ context: c.INNERTUBE_CONTEXT, ...body });
     const headers = {
       'Content-Type': 'application/json',
@@ -149,6 +251,9 @@
         window.__xmAuth = `signed (${auth.split(' ')[0]})`;
         return signed.json();
       }
+      if (options.signedOnly) {
+        throw new Error(`innertube/${endpoint} HTTP ${signed.status}`);
+      }
       // Signing personalises results but an unsigned search still works, so falling back keeps a refused signature from leaving a signed-in user worse off than a signed-out one.
       window.__xmAuth = `signed request refused (HTTP ${signed.status}), retried unsigned`;
     } else {
@@ -165,66 +270,239 @@
     return Array.isArray(runs) ? runs.map((run) => run.text) : [];
   };
 
+  const fixedRuns = (column) => {
+    const runs = column?.musicResponsiveListItemFixedColumnRenderer?.text?.runs;
+    return Array.isArray(runs) ? runs.map((run) => run.text) : [];
+  };
+
+  const runsText = (node) => (node?.runs || []).map((run) => run.text).join('');
+
   const DURATION_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
 
-  function parseSearchResponse(json) {
-    const tabs = json?.contents?.tabbedSearchResultsRenderer?.tabs || [];
-    const results = [];
-    for (const tab of tabs) {
-      const sections = tab?.tabRenderer?.content?.sectionListRenderer?.contents || [];
-      for (const section of sections) {
-        for (const entry of section?.musicShelfRenderer?.contents || []) {
-          const item = entry.musicResponsiveListItemRenderer;
-          if (!item) continue;
-          const videoId =
-            item.playlistItemData?.videoId ||
-            item.overlay?.musicItemThumbnailOverlayRenderer?.content
-              ?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId;
-          if (!videoId) continue;
+  // An album page puts a play count where a library row puts the album, and a
+  // history row appends a view count to the artist.
+  const COUNT_RE = /(plays|views)$/;
 
-          // The second column is "artist • album • duration", so find the duration by shape: singles omit the album and shift every index.
-          const meta = columnRuns(item.flexColumns?.[1]).filter((t) => t.trim() !== '•');
-          const durationAt = meta.findIndex((t) => DURATION_RE.test(t));
-          const rest = meta.filter((_, i) => i !== durationAt);
+  // Parsed because it arrives in the same response for free. Nothing in this
+  // process ever looks at it: the terminal draws its own artwork from this URL.
+  const largestThumbnail = (renderer) => {
+    const thumbnails = renderer?.musicThumbnailRenderer?.thumbnail?.thumbnails;
+    return Array.isArray(thumbnails) && thumbnails.length
+      ? thumbnails[thumbnails.length - 1].url
+      : '';
+  };
 
-          results.push({
-            videoId,
-            title: columnRuns(item.flexColumns?.[0]).join(''),
-            artist: rest[0] || '',
-            album: rest[1] || '',
-            duration: durationAt >= 0 ? meta[durationAt] : '',
-          });
-        }
-      }
-    }
-    return results;
+  // Null where the response says nothing, which is not the same as "not liked":
+  // search results carry no like state at all, and a heart that guessed would be
+  // wrong on every search row.
+  function likedFrom(status) {
+    if (status === 'LIKE') return true;
+    if (status === 'DISLIKE' || status === 'INDIFFERENT') return false;
+    return null;
   }
 
-  // `seq` is echoed back so the daemon can discard results for a search the user has already replaced.
-  window.__xmSearch = async (seq, query) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-    try {
-      const json = await innertube(
-        'search',
-        { query, params: SONGS_FILTER },
-        controller.signal,
+  /// One row of a list, whatever produced it.
+  ///
+  /// Search lays its metadata out as a single "artist • album • duration"
+  /// column; a library, playlist or album row uses one flex column per field and
+  /// a fixed column for the duration. Which shape this is gets read from the item
+  /// rather than from the feed that was asked for, so a feed that changes shape
+  /// loses fields instead of filling them with the wrong ones.
+  function parseListItem(item) {
+    const videoId =
+      item.playlistItemData?.videoId ||
+      item.overlay?.musicItemThumbnailOverlayRenderer?.content
+        ?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId;
+    // Also what skips the "Shuffle all" row at the head of the liked feed.
+    if (!videoId) return null;
+
+    const fixed = fixedRuns(item.fixedColumns?.[0]).find((text) => DURATION_RE.test(text)) || '';
+    let artist = '';
+    let album = '';
+    let duration = fixed;
+
+    if (fixed) {
+      // One field per column, except that a history row carries a view count
+      // beside the artist and an album page a play count where the album goes.
+      const meta = columnRuns(item.flexColumns?.[1]).filter((text) => text.trim() !== '•');
+      artist = meta.find((text) => !COUNT_RE.test(text)) || '';
+      const third = columnRuns(item.flexColumns?.[2]).join('');
+      album = COUNT_RE.test(third) ? '' : third;
+    } else {
+      // Singles omit the album and shift every index, so find the duration by shape.
+      const meta = columnRuns(item.flexColumns?.[1]).filter((text) => text.trim() !== '•');
+      const durationAt = meta.findIndex((text) => DURATION_RE.test(text));
+      const rest = meta.filter((_, index) => index !== durationAt);
+      artist = rest[0] || '';
+      album = rest[1] || '';
+      duration = durationAt >= 0 ? meta[durationAt] : '';
+    }
+
+    return {
+      videoId,
+      browseId: '',
+      title: columnRuns(item.flexColumns?.[0]).join(''),
+      artist,
+      album,
+      duration,
+      liked: likedFrom(
+        item.menu?.menuRenderer?.topLevelButtons?.[0]?.likeButtonRenderer?.likeStatus,
+      ),
+      thumbnail: largestThumbnail(item.thumbnail),
+    };
+  }
+
+  /// One playlist or album card.
+  ///
+  /// Carries an id to open rather than a videoId and a duration. The id is used
+  /// exactly as it arrives: a playlist's already carries its own `VL` prefix, and
+  /// prefixing it again produces a dead id. Cards with no id — the "New playlist"
+  /// button at the head of the playlists grid — are skipped, which is also what
+  /// keeps anything else the shelf grows out of the list.
+  function parseGridItem(item) {
+    const browseId = item.navigationEndpoint?.browseEndpoint?.browseId;
+    if (!browseId) return null;
+    return {
+      videoId: '',
+      browseId,
+      title: runsText(item.title),
+      artist: runsText(item.subtitle),
+      album: '',
+      duration: '',
+      liked: null,
+      thumbnail: largestThumbnail(item.thumbnailRenderer),
+    };
+  }
+
+  /// Every container a search, a browse or a continuation can answer in.
+  ///
+  /// They differ in where their shelves sit, not in what their items are, so the
+  /// walk ends here and one item parser serves all of them.
+  function sections(json) {
+    const out = [];
+    const push = (list) => out.push(...(list || []));
+
+    for (const tab of json?.contents?.tabbedSearchResultsRenderer?.tabs || []) {
+      push(tab?.tabRenderer?.content?.sectionListRenderer?.contents);
+    }
+    // A library feed. History answers with one shelf per date group, so all of
+    // them are walked; taking the first would lose most of the history.
+    for (const tab of json?.contents?.singleColumnBrowseResultsRenderer?.tabs || []) {
+      push(tab?.tabRenderer?.content?.sectionListRenderer?.contents);
+    }
+    // A playlist or an album, which answer in two columns rather than one.
+    push(json?.contents?.twoColumnBrowseResultsRenderer?.secondaryContents
+      ?.sectionListRenderer?.contents);
+
+    // A continuation answers with the shelf alone and no container around it.
+    for (const [key, shelf] of Object.entries(json?.continuationContents || {})) {
+      out.push(key === 'gridContinuation' ? { gridRenderer: shelf } : { musicShelfRenderer: shelf });
+    }
+    return out;
+  }
+
+  const continuationToken = (shelf) =>
+    shelf?.continuations?.[0]?.nextContinuationData?.continuation || '';
+
+  /// Walks one response into rows, with the token that asks for the rest.
+  function parseMusicList(json) {
+    const items = [];
+    let continuation = '';
+    for (const section of sections(json)) {
+      const list = section.musicShelfRenderer || section.musicPlaylistShelfRenderer;
+      if (list) {
+        for (const entry of list.contents || []) {
+          const row = entry.musicResponsiveListItemRenderer && parseListItem(entry.musicResponsiveListItemRenderer);
+          if (row) items.push(row);
+        }
+        continuation = continuationToken(list) || continuation;
+        continue;
+      }
+      const grid = section.gridRenderer;
+      if (grid) {
+        for (const entry of grid.items || []) {
+          const card = entry.musicTwoRowItemRenderer && parseGridItem(entry.musicTwoRowItemRenderer);
+          if (card) items.push(card);
+        }
+        continuation = continuationToken(grid) || continuation;
+      }
+    }
+    return { items, continuation };
+  }
+
+  /// Loads one browse id whole, following its continuations here in the page.
+  ///
+  /// Rust asks for a feed and receives a list; it never learns what a
+  /// continuation token is. Stops at `PAGE_CAP` and says that it did.
+  async function loadList(browseId, signal) {
+    const { items, continuation } = parseMusicList(
+      await innertube('browse', { browseId }, signal),
+    );
+    let token = continuation;
+    let pages = 1;
+    while (token && pages < PAGE_CAP) {
+      const page = parseMusicList(
+        await innertube('browse', {}, signal, {
+          params: { ctoken: token, continuation: token, type: 'next' },
+        }),
       );
-      const results = parseSearchResponse(json);
-      log(`search "${query}" -> ${results.length} results`);
-      await invoke('report_search_results', { seq, query, results, error: null });
+      // A page that adds nothing is the end of the feed, whatever token it
+      // still offers: the playlists grid keeps handing one back forever. Clearing
+      // the token is what stops that being reported as a truncated feed.
+      if (!page.items.length) {
+        token = '';
+        break;
+      }
+      items.push(...page.items);
+      token = page.continuation;
+      pages += 1;
+    }
+    return { items, truncated: !!token };
+  }
+
+  /// Runs one list-producing call and reports it, whatever produced it.
+  ///
+  /// `seq` is echoed back so the daemon can discard results for a list the user
+  /// has already moved past, and `source` names which pane asked.
+  async function reportList(seq, source, label, limit, load) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), limit);
+    try {
+      const { items, truncated } = await load(controller.signal);
+      log(`${source} "${label}" -> ${items.length} items${truncated ? ' (truncated)' : ''}`);
+      await invoke('report_list', { seq, label, items, truncated, error: null });
     } catch (error) {
-      log('search failed', error);
+      log(`${source} failed`, error);
       const message = error && error.name === 'AbortError'
-        ? `search timed out after ${SEARCH_TIMEOUT_MS / 1000}s`
-        : String(error && error.message || error);
-      await invoke('report_search_results',
-        { seq, query, results: [], error: message })
+        ? `${source} timed out after ${limit / 1000}s`
+        : String((error && error.message) || error);
+      await invoke('report_list',
+        { seq, label, items: [], truncated: false, error: message })
         .catch(() => {});
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  window.__xmSearch = (seq, query) =>
+    reportList(seq, 'search', query, SEARCH_TIMEOUT_MS, async (signal) => ({
+      items: parseMusicList(
+        await innertube('search', { query, params: SONGS_FILTER }, signal),
+      ).items,
+      truncated: false,
+    }));
+
+  window.__xmBrowse = (seq, feed) => {
+    const known = FEEDS[feed];
+    return reportList(seq, feed, known ? known.label : feed, BROWSE_TIMEOUT_MS, (signal) => {
+      if (!known) throw new Error(`unknown feed "${feed}"`);
+      return loadList(known.browseId, signal);
+    });
   };
+
+  // One playlist's or album's tracks. The id is whatever the grid card carried.
+  window.__xmPlaylist = (seq, browseId) =>
+    reportList(seq, 'playlist', browseId, BROWSE_TIMEOUT_MS, (signal) => loadList(browseId, signal));
 
   // ---------------------------------------------------------------- control ----
 
@@ -246,6 +524,32 @@
   }
 
   const loaded = (p) => !!(p.getVideoData() || {}).video_id;
+
+  // The daemon unloads this page when it goes idle, which loses whatever was
+  // loaded with it. Putting the track back paused and where it was keeps
+  // "pause, walk away, press play" meaning what it says. Only the track comes
+  // back: the queue it belonged to lived in the document that is gone.
+  async function restore(videoId, position) {
+    const failure = play(videoId);
+    if (failure) return failure;
+    // Measured against the clock rather than by counting polls: a hidden
+    // WKWebView throttles `setTimeout` to about a second, so a hundred nominal
+    // 100ms waits are a hundred real seconds, and the daemon gives up on this
+    // long before the loop does.
+    const deadline = Date.now() + RESTORE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await sleep(RESTORE_POLL_MS);
+      const p = player();
+      // resolveCommand starts playing as soon as the stream arrives, so wait for
+      // a loaded player before seeking, then hand it back paused.
+      const duration = p && loaded(p) ? p.getDuration() || 0 : 0;
+      if (!duration) continue;
+      if (position > 0) p.seekTo(Math.min(position, duration), true);
+      p.pauseVideo();
+      return null;
+    }
+    return 'the restored track did not load in time';
+  }
 
   async function transport(action) {
     const p = player();
@@ -325,6 +629,20 @@
     return null;
   }
 
+  // One more endpoint on the same signed, same-origin path the feeds use. A
+  // refusal is an HTTP error rather than a quiet no-op, so `innertube` throwing
+  // is what lets the interface put its optimistic heart back.
+  async function like(videoId, liked) {
+    if (!videoId) return 'nothing to like';
+    await innertube(
+      liked ? 'like/like' : 'like/removelike',
+      { target: { videoId } },
+      undefined,
+      { signedOnly: true },
+    );
+    return null;
+  }
+
   // Single entry point for every control call; `id` is echoed back so the waiting request learns what happened rather than that a script was queued.
   window.__xmDispatch = async (id, action, args) => {
     let error = null;
@@ -344,6 +662,12 @@
           break;
         case 'adopt_cookies':
           error = adopt(args.cookies);
+          break;
+        case 'restore':
+          error = await restore(args.videoId, args.position);
+          break;
+        case 'like':
+          error = await like(args.videoId, args.liked);
           break;
         default:
           error = `unknown action "${action}"`;

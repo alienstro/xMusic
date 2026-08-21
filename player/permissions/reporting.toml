@@ -9,12 +9,12 @@
 [[permission]]
 identifier = "allow-reporting"
 description = """
-Lets the music.youtube.com page hand playback state, search results, and \
+Lets the music.youtube.com page hand playback state, list results, and \
 control-call outcomes back to the daemon. All three only store data in memory; \
 none of them takes any action on the host.
 """
 commands.allow = [
     "report_state",
-    "report_search_results",
+    "report_list",
     "report_command",
 ]

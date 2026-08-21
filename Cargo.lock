@@ -4921,7 +4921,7 @@ dependencies = [
 
 [[package]]
 name = "xmusic-player"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -4930,11 +4930,19 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tiny_http",
+ "xmusic-protocol",
+]
+
+[[package]]
+name = "xmusic-protocol"
+version = "0.3.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
 name = "xmusic-tui"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "aes",
  "cbc",
@@ -4948,6 +4956,7 @@ dependencies = [
  "sha2",
  "unicode-width 0.2.0",
  "ureq",
+ "xmusic-protocol",
 ]
 
 [[package]]

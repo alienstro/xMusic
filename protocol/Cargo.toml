@@ -1,0 +1,12 @@
+[package]
+name = "xmusic-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wire types and constants shared by xmusic-player and the xmusic client"
+
+# Deliberately nothing else. This crate is what both halves agree on, so it must
+# not drag Tauri, ratatui, tiny_http or ureq into either of them.
+[dependencies]
+serde.workspace = true
