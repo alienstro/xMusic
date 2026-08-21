@@ -4921,7 +4921,7 @@ dependencies = [
 
 [[package]]
 name = "xmusic-player"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -4935,14 +4935,14 @@ dependencies = [
 
 [[package]]
 name = "xmusic-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "xmusic-tui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes",
  "cbc",
