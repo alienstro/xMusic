@@ -7,7 +7,8 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Mode};
+use crate::model::{Mode, Model};
+use crate::panes::Pane;
 
 /// Tungsten amber, the backlight of an analogue VU meter, is the only chromatic accent; everything else is graded by brightness so it reads under any terminal scheme.
 mod ink {
@@ -40,7 +41,7 @@ fn spinner(elapsed: std::time::Duration) -> &'static str {
     SPINNER[(elapsed.as_millis() / SPINNER_FRAME_MS) as usize % SPINNER.len()]
 }
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+pub fn draw(frame: &mut Frame, app: &mut Model) {
     let full = frame.area();
     if full.width < 30 || full.height < 11 {
         frame.render_widget(
@@ -92,9 +93,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_header(frame, app, next());
     draw_rule(frame, next());
-    draw_search(frame, app, next());
+    draw_navigation(frame, app, next());
     draw_rule(frame, next());
-    let columns = Columns::for_width(canvas.width as usize);
+    let columns = Columns::for_width(canvas.width as usize, app.panes.showing_grid());
     if show_columns {
         draw_column_header(frame, next(), &columns);
     }
@@ -122,7 +123,7 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame, app: &Model, area: Rect) {
     let (state, state_style) = if !app.online {
         ("not connected", Style::default().fg(ink::ALARM))
     } else if app.player.logged_in {
@@ -131,14 +132,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ("signed out", Style::default().fg(ink::ASH))
     };
 
-    let left_width = 6; // "xmusic"
+    let left_width = 6; // "xMusic"
 
     let gap = (area.width as usize).saturating_sub(left_width + display_width(state));
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("x", Style::default().fg(ink::AMBER).add_modifier(Modifier::BOLD)),
-            Span::styled("music", Style::default().fg(ink::BONE).add_modifier(Modifier::BOLD)),
+            Span::styled("Music", Style::default().fg(ink::BONE).add_modifier(Modifier::BOLD)),
             Span::raw(" ".repeat(gap)),
             Span::styled(state, state_style),
         ])),
@@ -146,7 +147,47 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
+/// One row carries all three of these because they are never wanted at once:
+/// typing a query replaces the tabs, and a drill-down replaces them with the
+/// trail that led into it, so there is never any question which list is on screen.
+fn draw_navigation(frame: &mut Frame, app: &Model, area: Rect) {
+    if matches!(app.mode, Mode::Editing) {
+        draw_search(frame, app, area);
+        return;
+    }
+    match app.panes.breadcrumb() {
+        Some(trail) => frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" ".repeat(GUTTER_WIDTH)),
+                Span::styled(
+                    truncate(&trail, (area.width as usize).saturating_sub(GUTTER_WIDTH)),
+                    Style::default().fg(ink::EMBER),
+                ),
+            ])),
+            area,
+        ),
+        None => draw_tabs(frame, app, area),
+    }
+}
+
+/// Amber is the only chromatic accent in the interface, so it is what marks the active tab; the rest are graded by brightness.
+fn draw_tabs(frame: &mut Frame, app: &Model, area: Rect) {
+    let mut spans = vec![Span::raw(" ".repeat(GUTTER_WIDTH))];
+    for (index, pane) in Pane::ALL.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(ink::SLATE)));
+        }
+        let style = if *pane == app.panes.active {
+            Style::default().fg(ink::AMBER).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(ink::ASH)
+        };
+        spans.push(Span::styled(pane.title(), style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_search(frame: &mut Frame, app: &Model, area: Rect) {
     let editing = matches!(app.mode, Mode::Editing);
     let prompt_style = if editing {
         Style::default().fg(ink::AMBER)
@@ -178,30 +219,39 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 // ----------------------------------------------------------------- results ----
 
-/// Column widths for the results table: album goes first on a narrow terminal, then artist, while title and running time always survive.
+/// Column widths for the list: album goes first on a narrow terminal, then
+/// artist, while title and running time always survive. A grid pane has neither
+/// a duration nor a like, so its rows are a name and one line about it.
 struct Columns {
+    /// Zero on a grid pane, where a playlist has no like state to show.
+    heart: usize,
     title: usize,
     artist: usize,
     album: usize,
     time: usize,
+    grid: bool,
 }
 
 impl Columns {
     const GAP: usize = 2;
     const TIME: usize = 5;
+    /// The glyph and the space after it, matched by hand in the column header.
+    const HEART: usize = 2;
 
-    fn for_width(width: usize) -> Self {
-        let available = width.saturating_sub(GUTTER_WIDTH);
-        let time = Self::TIME;
+    fn for_width(width: usize, grid: bool) -> Self {
+        let heart = if grid { 0 } else { Self::HEART };
+        let available = width.saturating_sub(GUTTER_WIDTH + heart);
+        let time = if grid { 0 } else { Self::TIME };
 
-        let (artist, album) = if available >= 78 {
-            (22, 22)
-        } else if available >= 58 {
-            (20, 0)
-        } else if available >= 40 {
-            (16, 0)
-        } else {
-            (0, 0)
+        let (artist, album) = match (grid, available) {
+            // One long subtitle rather than two columns: "Owner • 12 tracks".
+            (true, available) if available >= 58 => (30, 0),
+            (true, available) if available >= 40 => (22, 0),
+            (true, _) => (0, 0),
+            (false, available) if available >= 78 => (22, 22),
+            (false, available) if available >= 58 => (20, 0),
+            (false, available) if available >= 40 => (16, 0),
+            (false, _) => (0, 0),
         };
 
         let occupied = artist
@@ -210,27 +260,34 @@ impl Columns {
             + Self::GAP * [artist, album, time].iter().filter(|w| **w > 0).count();
 
         Self {
+            heart,
             title: available.saturating_sub(occupied).max(6),
             artist,
             album,
             time,
+            grid,
         }
     }
 }
 
 fn draw_column_header(frame: &mut Frame, area: Rect, columns: &Columns) {
-    let mut line = " ".repeat(GUTTER_WIDTH);
-    line.push_str(&pad("TITLE", columns.title));
+    let mut line = " ".repeat(GUTTER_WIDTH + columns.heart);
+    line.push_str(&pad(if columns.grid { "NAME" } else { "TITLE" }, columns.title));
     if columns.artist > 0 {
         line.push_str(&" ".repeat(Columns::GAP));
-        line.push_str(&pad("ARTIST", columns.artist));
+        line.push_str(&pad(
+            if columns.grid { "DETAIL" } else { "ARTIST" },
+            columns.artist,
+        ));
     }
     if columns.album > 0 {
         line.push_str(&" ".repeat(Columns::GAP));
         line.push_str(&pad("ALBUM", columns.album));
     }
-    line.push_str(&" ".repeat(Columns::GAP));
-    line.push_str(&format!("{:>width$}", "TIME", width = columns.time));
+    if columns.time > 0 {
+        line.push_str(&" ".repeat(Columns::GAP));
+        line.push_str(&format!("{:>width$}", "TIME", width = columns.time));
+    }
 
     frame.render_widget(
         Paragraph::new(line).style(Style::default().fg(ink::SLATE)),
@@ -238,18 +295,26 @@ fn draw_column_header(frame: &mut Frame, area: Rect, columns: &Columns) {
     );
 }
 
-fn draw_results(frame: &mut Frame, app: &mut App, area: Rect, columns: &Columns) {
-    if app.results.is_empty() {
-        let (message, style) = if app.searching {
+/// A filled heart for liked, a hollow one for known-not-liked, and nothing at
+/// all where the response never said — which is every search result, and is not
+/// the same as not liked.
+fn heart(liked: Option<bool>) -> Span<'static> {
+    match liked {
+        Some(true) => Span::styled("♥ ", Style::default().fg(ink::AMBER)),
+        Some(false) => Span::styled("♡ ", Style::default().fg(ink::SLATE)),
+        None => Span::raw("  "),
+    }
+}
+
+fn draw_results(frame: &mut Frame, app: &mut Model, area: Rect, columns: &Columns) {
+    if app.panes.visible().rows.is_empty() {
+        let (message, style) = if app.loading_list {
             (
-                format!("{} Searching", spinner(app.started.elapsed())),
+                format!("{} Loading", spinner(app.started.elapsed())),
                 Style::default().fg(ink::EMBER),
             )
         } else {
-            (
-                "Search for a song to start playing".to_string(),
-                Style::default().fg(ink::SLATE),
-            )
+            (empty_hint(app), Style::default().fg(ink::SLATE))
         };
         frame.render_widget(
             Paragraph::new(format!("{}{message}", " ".repeat(GUTTER_WIDTH))).style(style),
@@ -258,19 +323,26 @@ fn draw_results(frame: &mut Frame, app: &mut App, area: Rect, columns: &Columns)
         return;
     }
 
+    let playing_id = app.player.video_id.clone();
     let items: Vec<ListItem> = app
-        .results
+        .panes
+        .visible()
+        .rows
         .iter()
         .map(|result| {
             // Colour carries what is playing and the gutter carries the selection, so neither needs a glyph.
-            let playing = !result.video_id.is_empty() && result.video_id == app.player.video_id;
+            let playing = !result.video_id.is_empty() && result.video_id == playing_id;
             let title_style = if playing {
                 Style::default().fg(ink::AMBER).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(ink::BONE)
             };
 
-            let mut spans = vec![Span::styled(pad(&result.title, columns.title), title_style)];
+            let mut spans = Vec::new();
+            if columns.heart > 0 {
+                spans.push(heart(result.liked));
+            }
+            spans.push(Span::styled(pad(&result.title, columns.title), title_style));
             if columns.artist > 0 {
                 spans.push(Span::raw(" ".repeat(Columns::GAP)));
                 spans.push(Span::styled(
@@ -285,11 +357,13 @@ fn draw_results(frame: &mut Frame, app: &mut App, area: Rect, columns: &Columns)
                     Style::default().fg(ink::SLATE),
                 ));
             }
-            spans.push(Span::raw(" ".repeat(Columns::GAP)));
-            spans.push(Span::styled(
-                format!("{:>width$}", result.duration, width = columns.time),
-                Style::default().fg(ink::SLATE),
-            ));
+            if columns.time > 0 {
+                spans.push(Span::raw(" ".repeat(Columns::GAP)));
+                spans.push(Span::styled(
+                    format!("{:>width$}", result.duration, width = columns.time),
+                    Style::default().fg(ink::SLATE),
+                ));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -299,13 +373,24 @@ fn draw_results(frame: &mut Frame, app: &mut App, area: Rect, columns: &Columns)
             .highlight_symbol(GUTTER)
             .highlight_style(Style::default().fg(ink::AMBER)),
         area,
-        &mut app.list,
+        &mut app.panes.visible_mut().cursor,
     );
+}
+
+/// What an empty list says for itself, which differs by why it is empty.
+fn empty_hint(app: &Model) -> String {
+    if app.panes.breadcrumb().is_some() {
+        return "Nothing in this list".into();
+    }
+    match app.panes.active {
+        Pane::Search => "Search for a song to start playing".into(),
+        pane => format!("Press r to load {}", pane.title()),
+    }
 }
 
 // ------------------------------------------------------------- now playing ----
 
-fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: bool) {
+fn draw_now_playing(frame: &mut Frame, app: &Model, area: Rect, show_subtitle: bool) {
     let player = &app.player;
     let indent = " ".repeat(GUTTER_WIDTH);
 
@@ -323,7 +408,11 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: boo
         Span::styled("Daemon not running", Style::default().fg(ink::ALARM))
     } else if player.title.is_empty() {
         Span::styled(
-            if player.ready { "Nothing playing" } else { "Loading YouTube Music" },
+            match () {
+                _ if player.hibernating => "Idle - page unloaded",
+                _ if player.ready => "Nothing playing",
+                _ => "Loading YouTube Music",
+            },
             Style::default().fg(ink::SLATE),
         )
     } else if let Some(title) = app.loading_title() {
@@ -344,11 +433,18 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: boo
         player.byline.clone()
     };
 
-    let mut lines = vec![Line::from(vec![
+    // The heart sits after the title rather than before it, because here the
+    // marker column already belongs to the transport state.
+    let mut headline_spans = vec![
         Span::styled(marker, marker_style),
         Span::raw(" ".repeat(GUTTER_WIDTH - 1)),
         headline,
-    ])];
+    ];
+    if !player.title.is_empty() && player.liked.is_some() {
+        headline_spans.push(Span::raw("   "));
+        headline_spans.push(heart(player.liked));
+    }
+    let mut lines = vec![Line::from(headline_spans)];
     if show_subtitle {
         lines.push(Line::from(vec![
             Span::raw(indent),
@@ -364,7 +460,7 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, show_subtitle: boo
 }
 
 /// The line the interface is built around: elapsed timecode, meter, running time, fader.
-fn transport(app: &App, width: usize) -> Line<'static> {
+fn transport(app: &Model, width: usize) -> Line<'static> {
     let player = &app.player;
     let elapsed = format!("{:<5}", clock(player.position));
     let total = format!("{:>5}", clock(player.duration));
@@ -422,7 +518,7 @@ fn meter(width: usize, fraction: f64) -> (String, String, String) {
 
 // ------------------------------------------------------------------ status ----
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_status(frame: &mut Frame, app: &Model, area: Rect) {
     let style = match app.mode {
         Mode::ConfirmStopDaemon => Style::default().fg(ink::AMBER).add_modifier(Modifier::BOLD),
         _ if !app.online => Style::default().fg(ink::ALARM),
@@ -442,9 +538,13 @@ const EDIT_HINTS: &[&str] = &["Enter search", "Esc cancel"];
 
 /// Hints in descending order of usefulness, so a narrow terminal drops the least important instead of slicing a label.
 const KEY_HINTS: &[&str] = &[
+    "1-5 pane",
     "/ search",
+    "f like",
     "space play",
     "n/p track",
+    "Esc back",
+    "r reload",
     "L sign in",
     "←/→ seek",
     "+/- vol",

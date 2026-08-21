@@ -13,6 +13,7 @@ name = "xmusic"
 path = "src/main.rs"
 
 [dependencies]
+xmusic-protocol.workspace = true
 ratatui = "0.29"
 crossterm = "0.28"
 ureq = { version = "2", features = ["json"] }

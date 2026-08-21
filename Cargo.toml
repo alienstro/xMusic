@@ -1,14 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["player", "tui"]
+members = ["protocol", "player", "tui"]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"
 
 [workspace.dependencies]
+xmusic-protocol = { path = "protocol" }
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
