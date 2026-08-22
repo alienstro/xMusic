@@ -366,7 +366,13 @@ fn activate_selected(model: &mut Model) -> Vec<Effect> {
     // The new track starts at zero; a guess about the old one is now a lie.
     model.guessed_position = None;
     model.awaiting = Some(row.title);
-    vec![Effect::Play(row.video_id)]
+    // The list on screen goes with it, so what follows this track is the next
+    // row rather than the radio YouTube Music would invent around it.
+    let queue = model.panes.visible().queue();
+    vec![Effect::Play {
+        video_id: row.video_id,
+        queue,
+    }]
 }
 
 /// Toggles the like on the selected row, or on the now-playing track where there is no row to act on.

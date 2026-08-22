@@ -29,6 +29,12 @@ pub struct PlaylistRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PlayRequest {
     pub video_id: String,
+    /// The list the track was chosen from, in the order it is shown, so what
+    /// follows is the next row rather than the radio YouTube Music invents
+    /// around a lone track. Optional: a `/play` with no queue behaves as it
+    /// always did, which is what a `curl` by hand should still do.
+    #[serde(default)]
+    pub queue: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -469,11 +469,21 @@ shaped the design:
   player bar: a like placed through InnerTube never reaches YouTube Music's own
   bar, so that heart shows what this session set until the track changes.
 
-Only two things still touch the DOM: the next and previous buttons. The raw
-player has no queue of its own (`getPlaylist()` returns `null`), so skipping has
-to go through YouTube Music's controls. `previous` rewinds to 0 first, because
-YouTube Music restarts the current track instead of stepping back once you are a
-few seconds in.
+Playing a track hands the page the list it was chosen from, and the page follows
+that list. YouTube Music builds a radio queue around any single track it is
+handed and offers no endpoint that asks it not to, so the only way to play a
+liked song and then the next liked song is to get there first: the page starts
+the next row about half a second before the current track ends. Should its own
+autoplay win that race anyway, the next reading notices a track the list cannot
+explain and puts the list back. A track played with no list — `POST /play` by
+hand — still gets YouTube Music's radio, which is the only thing there is.
+
+`next` and `prev` follow the list too, and only fall back to the DOM when there
+is none: the raw player has no queue of its own (`getPlaylist()` returns
+`null`), so skipping through a radio has to go through YouTube Music's own
+buttons. Without a list, `previous` rewinds to 0 first, because YouTube Music
+restarts the current track instead of stepping back once you are a few seconds
+in.
 
 ### Control API
 
@@ -492,7 +502,7 @@ use `Content-Type: application/json`.
 | `POST /browse` | `{"feed": "liked"}` | Loads one tab: `liked`, `playlists`, `albums`, `history` |
 | `POST /playlist` | `{"browseId": "…"}` | Loads one playlist's or album's tracks |
 | `POST /like` | `{"videoId": "…", "liked": true}` | Sets or clears a like |
-| `POST /play` | `{"videoId": "…"}` | Plays a track |
+| `POST /play` | `{"videoId": "…", "queue": ["…"]}` | Plays a track; `queue` is the list it came from, and is optional |
 | `POST /control` | `{"action": "play_pause"}` | `play`, `pause`, `play_pause`, `next`, `prev` |
 | `POST /seek` | `{"delta": -5}` or `{"seconds": 60}` | Relative or absolute |
 | `POST /volume` | `{"delta": 5}` or `{"level": 40}` | Relative or absolute |
@@ -544,9 +554,10 @@ pause. `GET /state` reports `hibernating` while the page is gone, and the
 interface says `Idle - page unloaded` rather than pretending to load forever.
 
 Whatever was loaded comes back paused and at its old position, so pausing a
-track, walking away, and pressing play still does what it looks like. The queue
-that track belonged to does not come back, and cannot: it lived in the document
-that was released.
+track, walking away, and pressing play still does what it looks like. The list
+it was playing from comes back with it, because the daemon holds that rather
+than the page. YouTube Music's own queue does not come back, and cannot: it
+lived in the document that was released.
 
 `XMUSIC_IDLE_TIMEOUT` sets the idle period in seconds. `0` keeps the page loaded
 for the life of the daemon, which is the right setting if a several-second wake
@@ -589,8 +600,12 @@ loopback `Host` value.
   dropping its artwork claw back most of that, but nothing makes YouTube Music's
   own front-end cheap while it is on screen's worth of DOM. See
   [Memory](#memory).
-- Waking an unloaded page takes a few seconds, and the queue the last track
-  belonged to does not survive the unload — only the track and its position do.
+- Waking an unloaded page takes a few seconds. The track, its position and the
+  list it was playing from come back; anything YouTube Music had queued around
+  it does not.
+- Following a list costs about half a second of each track's tail: the next one
+  has to start before YouTube Music's autoplay does, and the daemon only reads
+  the player five times a second.
 - Search is filtered to songs. Searching for an album, an artist or a playlist
   is not offered; the library tabs are how you reach those.
 - Artists and subscriptions have no tab of their own yet. The same pattern

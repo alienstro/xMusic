@@ -36,6 +36,11 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longer, because a feed is several requests: the page follows its own continuations and answers once. Must outlast `BROWSE_TIMEOUT_MS` in `inject.js`, so a slow feed is reported by the page rather than timing out underneath it.
 const BROWSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most rows a queue may carry. Far above any list this daemon produces —
+/// a feed stops at its own page cap long before this — so it bounds what a
+/// caller can hand the page without standing between the user and a real list.
+const MAX_QUEUE: usize = 5000;
+
 /// How long YouTube Music is given to notice a freshly imported session before the page is reloaded onto it.
 const COOKIE_SETTLE: Duration = Duration::from_millis(150);
 
@@ -144,6 +149,10 @@ pub struct PlayerService {
     page: Arc<dyn PageDriver>,
     player: Mutex<PlayerState>,
     list: Arc<ListSlot>,
+    /// The list the current track is playing from. Held here rather than only in
+    /// the page, because the page is the one thing that does not survive an idle
+    /// unload and the list is what the user chose.
+    queue: Mutex<Vec<String>>,
     lifecycle: Mutex<PageLifecycle>,
     /// When the page was last needed. Reads of cached state do not count, or the client's own polling would keep the page alive forever.
     activity: Mutex<Instant>,
@@ -155,6 +164,7 @@ impl PlayerService {
             page,
             player: Mutex::default(),
             list: Arc::default(),
+            queue: Mutex::default(),
             lifecycle: Mutex::default(),
             // Counting from startup rather than from zero, so a daemon nobody talks to still waits out a full timeout before unloading the page it just loaded.
             activity: Mutex::new(Instant::now()),
@@ -272,11 +282,18 @@ impl PlayerService {
 
     // ------------------------------------------------------------ commands ---
 
-    pub fn play(&self, video_id: &str) -> Outcome<()> {
+    /// Starts a track, and remembers the list it came from.
+    ///
+    /// The queue is what makes the next track the next row: YouTube Music builds
+    /// a radio around any single track it is handed, and there is no endpoint
+    /// that asks it not to, so the page is given the list and follows it itself.
+    pub fn play(&self, video_id: &str, queue: &[String]) -> Outcome<()> {
         let video_id = self.checked_video_id(video_id)?;
+        let queue = self.checked_queue(queue)?;
+        *self.queue.lock().expect("queue mutex poisoned") = queue.clone();
         self.command(
             Need::Player,
-            PageCommand::Play { video_id },
+            PageCommand::Play { video_id, queue },
             DISPATCH_TIMEOUT,
         )
     }
@@ -373,6 +390,7 @@ impl PlayerService {
         let resume = (!player.video_id.is_empty()).then(|| ResumePoint {
             video_id: player.video_id,
             position: player.position,
+            queue: self.queue.lock().expect("queue mutex poisoned").clone(),
         });
 
         self.page.navigate(PageDestination::Blank)?;
@@ -427,9 +445,10 @@ impl PlayerService {
         self.touch();
 
         // Restored paused and where it was, so the command that triggered this
-        // wake is still the one that decides what happens next. The queue the
-        // track belonged to does not survive, and cannot: it lived in the old
-        // document. A list does not need the track back at all.
+        // wake is still the one that decides what happens next. YouTube Music's
+        // own queue died with the old document and cannot come back, but the
+        // list the user played from is the daemon's, and goes back with the
+        // track. A list does not need the track back at all.
         match resume {
             Some(resume) if need == Need::Player => self
                 .page
@@ -437,6 +456,7 @@ impl PlayerService {
                     PageCommand::Restore {
                         video_id: resume.video_id,
                         position: resume.position,
+                        queue: resume.queue,
                     },
                     RESTORE_TIMEOUT,
                 )
@@ -491,6 +511,23 @@ impl PlayerService {
     }
 
     // ------------------------------------------------------------- helpers ---
+
+    /// A queue is only ever a list of track ids, and is checked as strictly as
+    /// the one that is about to play: an id the page cannot use would become a
+    /// track that silently never starts, part way through a list.
+    fn checked_queue(&self, candidates: &[String]) -> Outcome<Vec<String>> {
+        if candidates.len() > MAX_QUEUE {
+            return Err(PlayerError::BadRequest(format!(
+                "\"queue\" holds more than {MAX_QUEUE} tracks"
+            )));
+        }
+        if let Some(bad) = candidates.iter().find(|id| !is_video_id(id)) {
+            return Err(PlayerError::BadRequest(format!(
+                "\"queue\" holds {bad:?}, which is not a valid YouTube id"
+            )));
+        }
+        Ok(candidates.to_vec())
+    }
 
     fn checked_video_id(&self, candidate: &str) -> Outcome<String> {
         if is_video_id(candidate) {

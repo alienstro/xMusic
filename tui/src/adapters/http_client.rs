@@ -50,11 +50,12 @@ pub fn open_playlist(browse_id: &str, timeout: Duration) -> Result<(), String> {
     )
 }
 
-pub fn play(video_id: &str, timeout: Duration) -> Result<(), String> {
+pub fn play(video_id: &str, queue: &[String], timeout: Duration) -> Result<(), String> {
     post(
         "/play",
         &PlayRequest {
             video_id: video_id.to_string(),
+            queue: queue.to_vec(),
         },
         timeout,
     )

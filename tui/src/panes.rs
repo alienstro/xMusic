@@ -81,6 +81,17 @@ impl Slot {
         self.cursor.selected().and_then(|index| self.rows.get(index))
     }
 
+    /// Every track in this list, in the order it is drawn: what plays on from
+    /// the row the user chose. Rows that are lists to open rather than tracks
+    /// carry no id and are not part of it.
+    pub fn queue(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|row| !row.video_id.is_empty())
+            .map(|row| row.video_id.clone())
+            .collect()
+    }
+
     fn fill(&mut self, list: &ListState) {
         self.rows = list.items.clone();
         self.label = list.label.clone();

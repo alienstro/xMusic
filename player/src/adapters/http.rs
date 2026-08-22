@@ -178,7 +178,9 @@ fn handle(service: &Arc<PlayerService>, control_token: &str, request: &mut Reque
         (true, "/playlist") => with(&body, |body: PlaylistRequest| {
             service.open_playlist(&body.browse_id)
         }),
-        (true, "/play") => with(&body, |body: PlayRequest| service.play(&body.video_id)),
+        (true, "/play") => with(&body, |body: PlayRequest| {
+            service.play(&body.video_id, &body.queue)
+        }),
         (true, "/like") => with(&body, |body: LikeRequest| {
             service.like(&body.video_id, body.liked)
         }),

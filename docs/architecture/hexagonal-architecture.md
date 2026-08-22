@@ -103,7 +103,7 @@ Examples:
 | Direction | Port or operation | Adapter |
 |---|---|---|
 | Inbound | `search(query)` | Local HTTP route `POST /search` |
-| Inbound | `play(video_id)` | Local HTTP route `POST /play` |
+| Inbound | `play(video_id, queue)` | Local HTTP route `POST /play` |
 | Inbound | Page state report | Tauri IPC command |
 | Inbound | Idle sweep | Timer thread |
 | Outbound | Dispatch a page command | Tauri webview and `inject.js` |
@@ -124,7 +124,7 @@ POST /play
 Validate PlayRequest
     |
     v
-PlayerService.play(video_id)
+PlayerService.play(video_id, queue)
     |
     +-- ensure the page is ready
     +-- dispatch the play command

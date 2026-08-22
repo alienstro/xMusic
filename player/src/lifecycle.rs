@@ -34,6 +34,8 @@ pub struct ResumePoint {
     pub video_id: String,
     /// Seconds.
     pub position: u32,
+    /// The list this track was playing from, so the wake puts back what follows it as well as the track itself.
+    pub queue: Vec<String>,
 }
 
 /// Where the page is, as far as the daemon controls it.

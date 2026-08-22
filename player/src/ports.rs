@@ -19,14 +19,26 @@ pub enum PageDestination {
 /// Something to do to the page that answers when it is done.
 #[derive(Clone, Debug)]
 pub enum PageCommand {
-    Play { video_id: String },
+    /// Starts one track, with the list it was chosen from so the page can follow
+    /// that list instead of YouTube Music's own radio. An empty queue leaves the
+    /// page to do whatever it would have done on its own.
+    Play {
+        video_id: String,
+        queue: Vec<String>,
+    },
     Transport(TransportAction),
     Seek(RelativeOr),
     Volume(RelativeOr),
     Like { video_id: String, liked: bool },
     AdoptCookies(Vec<Cookie>),
-    /// Put back what was loaded before an idle unload, paused and where it was.
-    Restore { video_id: String, position: u32 },
+    /// Put back what was loaded before an idle unload, paused and where it was,
+    /// with the list it belonged to: the document that held the queue is gone,
+    /// but the list the user played from is the daemon's to remember.
+    Restore {
+        video_id: String,
+        position: u32,
+        queue: Vec<String>,
+    },
 }
 
 /// Something to ask the page for that answers later, by reporting a list.

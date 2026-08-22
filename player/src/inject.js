@@ -48,6 +48,19 @@
   const PLAYING = 1;
   const BUFFERING = 3;
 
+  // How near the end of a track the next one in the list is started. YouTube
+  // Music builds a radio queue around any single track it is handed and there is
+  // no endpoint that asks it not to, so the only way to follow a list is to get
+  // there first. The daemon pumps state five times a second, so a shorter lead
+  // risks losing the race to the radio; this one costs about half a second of
+  // the tail and never lets the wrong song start.
+  const HANDOVER_LEAD = 0.6;
+
+  // How long a queued track is given to reach the player before the list is
+  // given up. A track that never arrives is not a reason to keep fighting the
+  // page over what plays next.
+  const HANDOVER_TIMEOUT_MS = 20_000;
+
   const log = (...args) => console.log('[xmusic]', ...args);
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -175,7 +188,11 @@
   }
 
   function report() {
-    invoke('report_state', { state: readState() }).catch(() => {});
+    const state = readState();
+    // Before the report rather than after it: the terminal should learn about a
+    // handover from the same reading that decided on one.
+    follow(state);
+    invoke('report_state', { state }).catch(() => {});
   }
 
   // Called by the daemon's state pump and after every control action, so a change shows up at once rather than on the next tick.
@@ -504,6 +521,95 @@
   window.__xmPlaylist = (seq, browseId) =>
     reportList(seq, 'playlist', browseId, BROWSE_TIMEOUT_MS, (signal) => loadList(browseId, signal));
 
+  // ------------------------------------------------------------------ queue ----
+
+  // The list the user pressed play in, so that what follows a track is the next
+  // row they can see rather than whatever radio YouTube Music invents around it.
+  //
+  // `index` is where in that list the player is, and -1 means no list is being
+  // followed: a track played on its own, a list that ran out, or a page that
+  // wandered somewhere the list cannot explain. `expecting` is a track that has
+  // been asked for and has not reached the player yet, during which nothing the
+  // player says about the outgoing track is worth acting on.
+  const queue = { ids: [], index: -1, expecting: '', asked: 0 };
+
+  function clearQueue() {
+    queue.ids = [];
+    queue.index = -1;
+    queue.expecting = '';
+  }
+
+  /// Starts the list entry at `index`, or gives the list up when there is none there.
+  ///
+  /// Answers whether a track was started, so "next" past the last row can say so
+  /// rather than looking like a button that did nothing.
+  function startQueued(index) {
+    if (index < 0 || index >= queue.ids.length) {
+      clearQueue();
+      return false;
+    }
+    const a = app();
+    if (!a || typeof a.resolveCommand !== 'function') {
+      clearQueue();
+      return false;
+    }
+    const videoId = queue.ids[index];
+    queue.index = index;
+    queue.expecting = videoId;
+    queue.asked = Date.now();
+    a.resolveCommand({ watchEndpoint: { videoId } });
+    return true;
+  }
+
+  /// Adopts a list, positioned at the track about to play.
+  ///
+  /// A track that is not in the list it came with leaves no list to follow,
+  /// which is also what an empty queue means: play this, and let the page do
+  /// whatever it would have done on its own.
+  function setQueue(ids, videoId) {
+    const list = Array.isArray(ids) ? ids.filter((id) => typeof id === 'string') : [];
+    const index = list.indexOf(videoId);
+    queue.ids = index >= 0 ? list : [];
+    queue.index = index;
+    queue.expecting = videoId;
+    queue.asked = Date.now();
+  }
+
+  /// Keeps the player on the list, called from every state reading.
+  ///
+  /// Two things move it along: a track close enough to its end that the next one
+  /// should start now, and a page that has already moved on by itself — which is
+  /// YouTube Music's autoplay winning the race, and is answered by putting the
+  /// list back rather than by giving up on it.
+  function follow(state) {
+    if (queue.index < 0) return;
+
+    if (queue.expecting) {
+      if (state.videoId !== queue.expecting) {
+        if (Date.now() - queue.asked > HANDOVER_TIMEOUT_MS) {
+          log('queued track never loaded; following the list no further');
+          clearQueue();
+        }
+        return;
+      }
+      queue.expecting = '';
+    }
+
+    if (state.videoId !== queue.ids[queue.index]) {
+      log('page left the list on its own; resuming it');
+      startQueued(queue.index + 1);
+      return;
+    }
+
+    // Read from the player rather than from the report, which floors both to
+    // whole seconds: half a second of lead cannot be measured in seconds.
+    const p = player();
+    if (!p || !state.isPlaying) return;
+    const duration = p.getDuration() || 0;
+    if (!duration || duration - (p.getCurrentTime() || 0) > HANDOVER_LEAD) return;
+    startQueued(queue.index + 1);
+  }
+
   // ---------------------------------------------------------------- control ----
 
   function click(selector) {
@@ -514,9 +620,10 @@
   }
 
   // Each returns null on success or a sentence explaining why not, so the daemon can pass a real reason back.
-  function play(videoId) {
+  function play(videoId, ids) {
     const a = app();
     if (a && typeof a.resolveCommand === 'function') {
+      setQueue(ids, videoId);
       a.resolveCommand({ watchEndpoint: { videoId } });
       return null;
     }
@@ -529,8 +636,8 @@
   // loaded with it. Putting the track back paused and where it was keeps
   // "pause, walk away, press play" meaning what it says. Only the track comes
   // back: the queue it belonged to lived in the document that is gone.
-  async function restore(videoId, position) {
-    const failure = play(videoId);
+  async function restore(videoId, position, ids) {
+    const failure = play(videoId, ids);
     if (failure) return failure;
     // Measured against the clock rather than by counting polls: a hidden
     // WKWebView throttles `setTimeout` to about a second, so a hundred nominal
@@ -567,10 +674,24 @@
         if (p.getPlayerState() === PLAYING) p.pauseVideo();
         else p.playVideo();
         return null;
-      // The queue belongs to YouTube Music, not the raw player, so click the real buttons: getPlaylist() is null and nextVideo() leaves the player bar behind.
+      // While a list is being followed, the list is what next and prev mean:
+      // clicking YouTube Music's own buttons would step through the radio it
+      // built around the track and leave the list behind. Without one, the queue
+      // belongs to YouTube Music rather than the raw player, so click the real
+      // buttons: getPlaylist() is null and nextVideo() leaves the player bar
+      // behind.
       case 'next':
+        if (queue.index >= 0) {
+          return startQueued(queue.index + 1) ? null : 'that was the last track in the list';
+        }
         return click('.next-button');
       case 'prev':
+        if (queue.index > 0) return startQueued(queue.index - 1) ? null : 'nothing before this in the list';
+        // The first row of a list has nothing before it, so prev means what YouTube Music's own does there: back to the start of the track.
+        if (queue.index === 0) {
+          p.seekTo(0, true);
+          return null;
+        }
         // A few seconds in, YouTube Music restarts the track instead of stepping back, so rewind first and let "prev" mean prev.
         if ((p.getCurrentTime() || 0) > 3) {
           p.seekTo(0, true);
@@ -649,7 +770,7 @@
     try {
       switch (action) {
         case 'play':
-          error = play(args.videoId);
+          error = play(args.videoId, args.queue);
           break;
         case 'transport':
           error = await transport(args.action);
@@ -664,7 +785,7 @@
           error = adopt(args.cookies);
           break;
         case 'restore':
-          error = await restore(args.videoId, args.position);
+          error = await restore(args.videoId, args.position, args.queue);
           break;
         case 'like':
           error = await like(args.videoId, args.liked);

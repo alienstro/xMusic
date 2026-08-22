@@ -165,7 +165,9 @@ fn change(value: RelativeOr) -> Value {
 /// The wire form `inject.js` switches on. The one place the two vocabularies meet.
 fn describe(command: PageCommand) -> (&'static str, Value) {
     match command {
-        PageCommand::Play { video_id } => ("play", json!({ "videoId": video_id })),
+        PageCommand::Play { video_id, queue } => {
+            ("play", json!({ "videoId": video_id, "queue": queue }))
+        }
         PageCommand::Transport(action) => ("transport", json!({ "action": action.as_str() })),
         PageCommand::Seek(value) => ("seek", change(value)),
         PageCommand::Volume(value) => ("volume", change(value)),
@@ -176,9 +178,13 @@ fn describe(command: PageCommand) -> (&'static str, Value) {
             "adopt_cookies",
             json!({ "cookies": serde_json::to_value(cookies).expect("cookies serialise") }),
         ),
-        PageCommand::Restore { video_id, position } => (
+        PageCommand::Restore {
+            video_id,
+            position,
+            queue,
+        } => (
             "restore",
-            json!({ "videoId": video_id, "position": position }),
+            json!({ "videoId": video_id, "position": position, "queue": queue }),
         ),
     }
 }

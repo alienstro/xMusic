@@ -37,7 +37,11 @@ pub enum Effect {
     Browse(Feed),
     OpenPlaylist(String),
     Like { video_id: String, liked: bool },
-    Play(String),
+    /// A track, with the list it was chosen from so the daemon can follow that list rather than YouTube Music's radio.
+    Play {
+        video_id: String,
+        queue: Vec<String>,
+    },
     Transport(TransportAction),
     Seek { delta: i64 },
     Volume { delta: i64 },
@@ -216,7 +220,7 @@ fn perform(effect: &Effect, timeout: Duration) -> Result<(), String> {
         Effect::Browse(feed) => http_client::browse(*feed, timeout),
         Effect::OpenPlaylist(browse_id) => http_client::open_playlist(browse_id, timeout),
         Effect::Like { video_id, liked } => http_client::like(video_id, *liked, timeout),
-        Effect::Play(video_id) => http_client::play(video_id, timeout),
+        Effect::Play { video_id, queue } => http_client::play(video_id, queue, timeout),
         Effect::Transport(action) => http_client::transport(*action, timeout),
         Effect::Seek { delta } => http_client::seek(*delta, timeout),
         Effect::Volume { delta } => http_client::volume(*delta, timeout),

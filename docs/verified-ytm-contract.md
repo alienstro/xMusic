@@ -75,6 +75,9 @@ getPlayerState(), never from aria-label. The attribute carrying the text is `tit
 
 next-button: verified advances the YTM radio queue coherently after resolveCommand
   (API + bar agree, no reload, URL gains &list=RD...).
+  The &list=RD is the problem a list has to work around: a lone watchEndpoint
+  always gets a radio, so following a real list means resolveCommand-ing the
+  next row shortly before the current track ends rather than clicking this.
 previous-button: no-op when deep into a track (YTM restarts instead). After
   seekTo(2) it correctly returned to the prior track. Matches YTM's own UX.
 
