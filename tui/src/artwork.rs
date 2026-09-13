@@ -27,17 +27,11 @@ const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// CDN should drop the image, never the interface.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The cover's shape: 16 by 9, which is the shape a YouTube thumbnail arrives
-/// in. Drawing it at that shape shows the whole frame and crops nothing away,
-/// where a square box would discard nearly half of it.
-const ASPECT_WIDTH: u16 = 16;
-const ASPECT_HEIGHT: u16 = 9;
-
 /// Rows the now-playing card grows to when it has room to show a cover.
 ///
-/// Fourteen rows almost doubles the half-block resolution of the old box.
-/// A cell is one pixel wide and two tall, so a 16:9 cover at fourteen rows is
-/// 49 cells wide. The source is scaled to that larger pixel target.
+/// The cover is square. A cell is one pixel wide and two pixels tall, so the
+/// box is twice as many columns as rows. Fourteen rows gives it a larger
+/// half-block target.
 const ART_ROWS: u16 = 14;
 
 /// Rows the card takes when it shows no cover, matching the height the
@@ -51,7 +45,7 @@ const ART_MIN_CANVAS_HEIGHT: u16 = 25;
 /// Cells of width of the cover. The floor keeps a short card from drawing a
 /// sliver, and the ceiling keeps the cover from crowding out the title beside it.
 const MIN_ART_WIDTH: u16 = 8;
-const MAX_ART_WIDTH: u16 = 49;
+const MAX_ART_WIDTH: u16 = 28;
 
 /// Columns the title beside the cover needs before the cover is worth showing.
 /// Below this the two would fight over the same cells, and the title is the one
@@ -78,32 +72,24 @@ pub fn band_height(shows_art: bool, show_subtitle: bool) -> u16 {
     }
 }
 
-/// Width in cells that draws the cover at its own 16:9 in a box this many rows
-/// tall. A cell is two pixels tall, so the width is twice what a plain ratio
-/// would give.
+/// Width in cells that draws a square cover in a box this many rows tall.
+/// A cell is two pixels tall, so the square width is twice the row count.
 pub fn art_width(band_rows: u16) -> u16 {
-    let wide = band_rows.saturating_mul(2).saturating_mul(ASPECT_WIDTH) / ASPECT_HEIGHT;
+    let wide = band_rows.saturating_mul(2);
     wide.clamp(MIN_ART_WIDTH, MAX_ART_WIDTH)
 }
 
-/// Crops a cover to the centred rectangle of the given shape, so a source of
-/// another shape fills the box instead of being squashed into it. The centre is
-/// kept, which is where the artwork is.
-pub fn crop_to_aspect(image: DynamicImage, aspect_width: u16, aspect_height: u16) -> DynamicImage {
-    let (width, height) = (image.width(), image.height());
-    let (aspect_width, aspect_height) = (aspect_width as u32, aspect_height as u32);
-    // The largest rectangle of the wanted shape that fits inside the source.
-    let (crop_width, crop_height) = if width * aspect_height > height * aspect_width {
-        (height * aspect_width / aspect_height, height)
-    } else {
-        (width, width * aspect_height / aspect_width)
-    };
-    image.crop_imm(
-        (width - crop_width) / 2,
-        (height - crop_height) / 2,
-        crop_width,
-        crop_height,
-    )
+/// Fits the whole cover into a transparent square canvas.
+///
+/// The source keeps its own shape. The extra space stays transparent, so the
+/// renderer draws the card colour around it rather than cropping the picture.
+pub fn fit_square(image: DynamicImage) -> DynamicImage {
+    let side = image.width().max(image.height());
+    let mut square = image::RgbaImage::new(side, side);
+    let x = (side - image.width()) / 2;
+    let y = (side - image.height()) / 2;
+    image::imageops::overlay(&mut square, &image.to_rgba8(), x.into(), y.into());
+    DynamicImage::ImageRgba8(square)
 }
 
 /// The pixels ratatui-image will ask for in an area of this size, at this
@@ -294,12 +280,8 @@ impl Artwork {
         };
         if stale {
             let (width, height) = target_pixels(picker.font_size(), area);
-            let prepared = crop_to_aspect(
-                trim_flat_side_bands(image.clone()),
-                ASPECT_WIDTH,
-                ASPECT_HEIGHT,
-            )
-            .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            let prepared = fit_square(trim_flat_side_bands(image.clone()))
+                .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
             let protocol = picker.new_resize_protocol(prepared);
             self.shown = Some((self.wanted.clone(), area, protocol));
         }
@@ -313,10 +295,10 @@ mod tests {
 
     #[test]
     fn a_cover_is_shown_only_on_an_image_terminal_with_the_room_for_it() {
-        // 49-wide cover + 2 gap + 24 of title = 75 columns is the threshold.
+        // 28-wide cover + 2 gap + 24 of title = 54 columns is the threshold.
         assert!(shows_art(true, 80, 25));
-        assert!(shows_art(true, 75, 25));
-        assert!(!shows_art(true, 74, 25));
+        assert!(shows_art(true, 54, 25));
+        assert!(!shows_art(true, 53, 25));
         assert!(!shows_art(true, 80, 24));
         assert!(!shows_art(false, 200, 50));
     }
@@ -333,16 +315,16 @@ mod tests {
     }
 
     #[test]
-    fn the_cover_draws_at_sixteen_by_nine() {
-        // Fourteen rows is two pixels per row, so a 16:9 cover is 49 cells wide.
-        assert_eq!(art_width(14), 49);
+    fn the_cover_draws_at_a_square_shape() {
+        // Fourteen rows is two pixels per row, so a square is 28 cells wide.
+        assert_eq!(art_width(14), 28);
     }
 
     #[test]
     fn fourteen_rows_asks_for_the_larger_pixel_target() {
         // The larger box draws with more cells than the source thumbnail.
-        let target = target_pixels((10, 20), Rect::new(0, 0, 49, 14));
-        assert_eq!(target, (490, 280));
+        let target = target_pixels((10, 20), Rect::new(0, 0, 28, 14));
+        assert_eq!(target, (280, 280));
     }
 
     #[test]
@@ -352,24 +334,21 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_cover_is_cropped_to_the_shape_asked_for() {
-        // 320x180 into 16:9 is already the right shape, so nothing is removed.
-        let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(320, 180), 16, 9);
-        assert_eq!((cropped.width(), cropped.height()), (320, 180));
+    fn a_wide_cover_is_padded_to_a_square() {
+        let fitted = fit_square(image::DynamicImage::new_rgb8(320, 180));
+        assert_eq!((fitted.width(), fitted.height()), (320, 320));
     }
 
     #[test]
-    fn a_square_cover_is_cropped_to_sixteen_by_nine() {
-        // 180x180 into 16:9 takes the full width and the middle 101 rows.
-        let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(180, 180), 16, 9);
-        assert_eq!((cropped.width(), cropped.height()), (180, 101));
+    fn a_square_cover_keeps_its_square_shape() {
+        let fitted = fit_square(image::DynamicImage::new_rgb8(180, 180));
+        assert_eq!((fitted.width(), fitted.height()), (180, 180));
     }
 
     #[test]
-    fn a_tall_cover_is_cropped_to_sixteen_by_nine() {
-        // 180x360 into 16:9 takes the full width and the middle 101 rows.
-        let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(180, 360), 16, 9);
-        assert_eq!((cropped.width(), cropped.height()), (180, 101));
+    fn a_tall_cover_is_padded_to_a_square() {
+        let fitted = fit_square(image::DynamicImage::new_rgb8(180, 360));
+        assert_eq!((fitted.width(), fitted.height()), (360, 360));
     }
 
     #[test]
