@@ -67,7 +67,7 @@ pub fn draw(frame: &mut Frame, app: &mut Model) {
     // spare them and there is a cover to put there. Waiting for a thumbnail
     // rather than reserving on every tall terminal keeps an idle card at its
     // old height instead of standing open on empty space.
-    let art = crate::artwork::shows_art(app.artwork.available(), canvas.height)
+    let art = crate::artwork::shows_art(app.artwork.available(), canvas.width, canvas.height)
         && !app.player.thumbnail.is_empty();
     let now_playing_height = crate::artwork::band_height(art, show_subtitle);
 
@@ -415,27 +415,20 @@ fn draw_player_card(frame: &mut Frame, app: &mut Model, area: Rect, show_subtitl
         .constraints([Constraint::Length(width + 2), Constraint::Min(20)])
         .split(area);
 
-    // The image draws into a square inset, vertically centred, so a card taller
-    // than the cover does not stretch it.
-    let art_area = centered_square(columns[0], width);
-    if let (Some(protocol), true) = (app.artwork.protocol(), art_area.width > 0) {
-        let image = ratatui_image::StatefulImage::default();
-        frame.render_stateful_widget(image, art_area, protocol);
+    // The cover fills the card's own rows, so the crop the artwork module
+    // applies is the shape that is actually drawn.
+    let art_area = Rect {
+        width: width.min(columns[0].width),
+        ..columns[0]
+    };
+    if art_area.width > 0 {
+        if let Some(protocol) = app.artwork.protocol(art_area) {
+            let image = ratatui_image::StatefulImage::default();
+            frame.render_stateful_widget(image, art_area, protocol);
+        }
     }
 
     draw_player_text(frame, app, columns[1], show_subtitle);
-}
-
-/// The cover's box: `width` cells wide and the same number of pixels tall,
-/// centred in the cell it was given.
-fn centered_square(area: Rect, width: u16) -> Rect {
-    let height = (width / 2).min(area.height);
-    Rect {
-        x: area.x,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width: width.min(area.width),
-        height,
-    }
 }
 
 /// The now-playing text on its own: the transport line, the title, the artist.

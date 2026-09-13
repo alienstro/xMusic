@@ -15,6 +15,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use image::DynamicImage;
+use ratatui::layout::Rect;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
@@ -26,10 +27,19 @@ const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// CDN should drop the image, never the interface.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Rows the now-playing card grows to when it has room to show a cover. A cell
-/// is about twice as tall as it is wide, so eight rows draw a sixteen-pixel
-/// square, which is the smallest cover that still reads as one.
-const ART_ROWS: u16 = 8;
+/// The cover's shape: 16 by 9, which is the shape a YouTube thumbnail arrives
+/// in. Drawing it at that shape shows the whole frame and crops nothing away,
+/// where a square box would discard nearly half of it.
+const ASPECT_WIDTH: u16 = 16;
+const ASPECT_HEIGHT: u16 = 9;
+
+/// Rows the now-playing card grows to when it has room to show a cover.
+///
+/// Nine rows is not arbitrary: a cell is one pixel wide and two tall, so a
+/// 16:9 cover at nine rows is 32 cells wide, and the crate then asks for
+/// 320x180 pixels, which is exactly what `mqdefault` is. The source is drawn
+/// pixel for pixel, and nothing is resampled at all.
+const ART_ROWS: u16 = 9;
 
 /// Rows the card takes when it shows no cover, matching the height the
 /// interface used before artwork existed.
@@ -39,15 +49,23 @@ const PLAIN_ROWS_NO_SUBTITLE: u16 = 2;
 /// Terminal height below which the cover is not worth its rows, and is dropped.
 const ART_MIN_CANVAS_HEIGHT: u16 = 24;
 
-/// Cells of width of a square cover. Two cells per row of height keeps the
-/// image square; the floor keeps a short card from drawing a sliver, and the
-/// ceiling keeps the cover from crowding out the title beside it.
+/// Cells of width of the cover. The floor keeps a short card from drawing a
+/// sliver, and the ceiling keeps the cover from crowding out the title beside it.
 const MIN_ART_WIDTH: u16 = 8;
-const MAX_ART_WIDTH: u16 = 20;
+const MAX_ART_WIDTH: u16 = 36;
+
+/// Columns the title beside the cover needs before the cover is worth showing.
+/// Below this the two would fight over the same cells, and the title is the one
+/// that has to stay readable.
+const ART_MIN_TEXT_WIDTH: u16 = 24;
 
 /// Whether this terminal and this window have room to show a cover.
-pub fn shows_art(art_available: bool, canvas_height: u16) -> bool {
-    art_available && canvas_height >= ART_MIN_CANVAS_HEIGHT
+pub fn shows_art(art_available: bool, canvas_width: u16, canvas_height: u16) -> bool {
+    if !art_available || canvas_height < ART_MIN_CANVAS_HEIGHT {
+        return false;
+    }
+    // The cover's own column, its gap, and the least room the title may keep.
+    canvas_width >= art_width(ART_ROWS) + 2 + ART_MIN_TEXT_WIDTH
 }
 
 /// Height in rows of the now-playing card, cover included.
@@ -61,20 +79,43 @@ pub fn band_height(shows_art: bool, show_subtitle: bool) -> u16 {
     }
 }
 
-/// Width in cells of a square cover drawn in a card this many rows tall.
-pub fn art_width(band_height: u16) -> u16 {
-    (band_height * 2).clamp(MIN_ART_WIDTH, MAX_ART_WIDTH)
+/// Width in cells that draws the cover at its own 16:9 in a box this many rows
+/// tall. A cell is two pixels tall, so the width is twice what a plain ratio
+/// would give.
+pub fn art_width(band_rows: u16) -> u16 {
+    let wide = band_rows.saturating_mul(2).saturating_mul(ASPECT_WIDTH) / ASPECT_HEIGHT;
+    wide.clamp(MIN_ART_WIDTH, MAX_ART_WIDTH)
 }
 
-/// Crops a cover to the centred square the card reserves, so a wide thumbnail
-/// fills the box instead of being letterboxed inside it. A square covers the
-/// centre, which is where the artwork is; the edges a crop removes are the
-/// least of the image.
-pub fn square(image: DynamicImage) -> DynamicImage {
-    let side = image.width().min(image.height());
-    let x = (image.width() - side) / 2;
-    let y = (image.height() - side) / 2;
-    image.crop_imm(x, y, side, side)
+/// Crops a cover to the centred rectangle of the given shape, so a source of
+/// another shape fills the box instead of being squashed into it. The centre is
+/// kept, which is where the artwork is.
+pub fn crop_to_aspect(image: DynamicImage, aspect_width: u16, aspect_height: u16) -> DynamicImage {
+    let (width, height) = (image.width(), image.height());
+    let (aspect_width, aspect_height) = (aspect_width as u32, aspect_height as u32);
+    // The largest rectangle of the wanted shape that fits inside the source.
+    let (crop_width, crop_height) = if width * aspect_height > height * aspect_width {
+        (height * aspect_width / aspect_height, height)
+    } else {
+        (width, width * aspect_height / aspect_width)
+    };
+    image.crop_imm(
+        (width - crop_width) / 2,
+        (height - crop_height) / 2,
+        crop_width,
+        crop_height,
+    )
+}
+
+/// The pixels ratatui-image will ask for in an area of this size, at this
+/// picker's font size. Handing it a source already at these dimensions is what
+/// keeps the image sharp: the crate resamples internally with a nearest
+/// filter, which mangles a cover at the small sizes a terminal draws.
+pub fn target_pixels(font_size: (u16, u16), area: Rect) -> (u32, u32) {
+    (
+        area.width as u32 * font_size.0 as u32,
+        area.height as u32 * font_size.1 as u32,
+    )
 }
 
 /// When to fetch a cover, and what to do with one that arrives.
@@ -141,8 +182,11 @@ pub struct Artwork {
     picker: Option<Picker>,
     /// Decoded covers by URL, kept so a track played again draws with no fetch.
     cache: HashMap<String, DynamicImage>,
-    /// The cover being drawn, and the URL it belongs to.
-    shown: Option<(String, StatefulProtocol)>,
+    /// The URL the card should be showing, which is the player's current one.
+    wanted: String,
+    /// The built cover, with the URL and the area it was built for. Rebuilt when
+    /// either changes, because the pixels depend on both.
+    shown: Option<(String, Rect, StatefulProtocol)>,
     plan: Plan,
 }
 
@@ -169,41 +213,42 @@ impl Artwork {
 
     /// Records the now-playing cover, and reports whether its bytes are needed.
     pub fn want(&mut self, url: &str) -> bool {
+        self.wanted = url.to_string();
         let have = self.cache.contains_key(url);
-        let needed = self.plan.sync(url, have);
-        if !needed {
-            self.ensure_shown(url);
-        }
-        needed
+        self.plan.sync(url, have)
     }
 
-    /// Files a decoded cover and draws it if it is still the current track.
+    /// Files a decoded cover. It is drawn on the next frame if it is still the
+    /// track the player is on.
     pub fn deliver(&mut self, url: &str, image: DynamicImage) {
         self.cache.insert(url.to_string(), image);
-        if self.plan.accept(url) {
-            self.ensure_shown(url);
-        }
+        self.plan.accept(url);
     }
 
-    /// Points the drawn cover at a URL, building it from the cache if it is
-    /// there and clearing it when it is not, so a track with no art shows none.
-    fn ensure_shown(&mut self, url: &str) {
-        if let Some((shown, _)) = &self.shown {
-            if shown == url {
-                return;
-            }
-        }
-        self.shown = None;
-        let (Some(picker), Some(image)) = (self.picker.as_ref(), self.cache.get(url)) else {
-            return;
+    /// The cover to draw in this area, building it if it is not already built
+    /// for that area. `None` when there is no cover, or the terminal cannot
+    /// draw one, which is what leaves the card as plain text.
+    ///
+    /// The image is cropped to the area's shape and scaled to exactly the
+    /// pixels the widget will ask for. Both matter: the crop stops a source of
+    /// another shape from being squashed, and the pre-scale stops the crate's
+    /// own nearest-neighbour resample from mangling a small cover.
+    pub fn protocol(&mut self, area: Rect) -> Option<&mut StatefulProtocol> {
+        let picker = self.picker.as_ref()?;
+        let image = self.cache.get(&self.wanted)?;
+
+        let stale = match &self.shown {
+            Some((url, built, _)) => url != &self.wanted || *built != area,
+            None => true,
         };
-        let protocol = picker.new_resize_protocol(square(image.clone()));
-        self.shown = Some((url.to_string(), protocol));
-    }
-
-    /// The cover to draw, as state that `StatefulImage` renders.
-    pub fn protocol(&mut self) -> Option<&mut StatefulProtocol> {
-        self.shown.as_mut().map(|(_, protocol)| protocol)
+        if stale {
+            let (width, height) = target_pixels(picker.font_size(), area);
+            let prepared = crop_to_aspect(image.clone(), ASPECT_WIDTH, ASPECT_HEIGHT)
+                .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            let protocol = picker.new_resize_protocol(prepared);
+            self.shown = Some((self.wanted.clone(), area, protocol));
+        }
+        self.shown.as_mut().map(|(_, _, protocol)| protocol)
     }
 }
 
@@ -212,11 +257,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cover_is_shown_only_on_an_image_terminal_with_the_height_for_it() {
-        assert!(shows_art(true, 24));
-        assert!(shows_art(true, 40));
-        assert!(!shows_art(true, 23));
-        assert!(!shows_art(false, 40));
+    fn a_cover_is_shown_only_on_an_image_terminal_with_the_room_for_it() {
+        // 32-wide cover + 2 gap + 24 of title = 58 columns is the threshold.
+        assert!(shows_art(true, 80, 24));
+        assert!(shows_art(true, 58, 24));
+        assert!(!shows_art(true, 57, 24));
+        assert!(!shows_art(true, 80, 23));
+        assert!(!shows_art(false, 200, 50));
     }
 
     #[test]
@@ -231,34 +278,44 @@ mod tests {
     }
 
     #[test]
-    fn cover_is_square_across_two_cells_per_row() {
-        assert_eq!(art_width(8), 16);
+    fn the_cover_draws_at_sixteen_by_nine() {
+        // Nine rows is two pixels per row, so a 16:9 cover is 32 cells wide.
+        assert_eq!(art_width(9), 32);
+    }
+
+    #[test]
+    fn nine_rows_asks_for_exactly_a_mqdefault_thumbnail() {
+        // The whole point of the 16:9 shape at nine rows: the pixel target is
+        // 320x180, which is what mqdefault already is, so nothing resamples.
+        let target = target_pixels((10, 20), Rect::new(0, 0, 32, 9));
+        assert_eq!(target, (320, 180));
     }
 
     #[test]
     fn cover_width_is_held_between_a_floor_and_a_ceiling() {
         assert_eq!(art_width(2), MIN_ART_WIDTH);
-        assert_eq!(art_width(12), MAX_ART_WIDTH);
+        assert_eq!(art_width(30), MAX_ART_WIDTH);
     }
 
     #[test]
-    fn a_wide_cover_is_cropped_to_a_centred_square() {
-        // 320x180: a square crop takes the full height and centres the width.
-        let cropped = square(image::DynamicImage::new_rgb8(320, 180));
-        assert_eq!((cropped.width(), cropped.height()), (180, 180));
+    fn a_wide_cover_is_cropped_to_the_shape_asked_for() {
+        // 320x180 into 16:9 is already the right shape, so nothing is removed.
+        let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(320, 180), 16, 9);
+        assert_eq!((cropped.width(), cropped.height()), (320, 180));
     }
 
     #[test]
-    fn a_tall_cover_is_cropped_to_a_centred_square() {
-        // 180x320: a square crop takes the full width and centres the height.
-        let cropped = square(image::DynamicImage::new_rgb8(180, 320));
-        assert_eq!((cropped.width(), cropped.height()), (180, 180));
+    fn a_square_cover_is_cropped_to_sixteen_by_nine() {
+        // 180x180 into 16:9 takes the full width and the middle 101 rows.
+        let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(180, 180), 16, 9);
+        assert_eq!((cropped.width(), cropped.height()), (180, 101));
     }
 
     #[test]
-    fn a_square_cover_is_left_alone() {
-        let cropped = square(image::DynamicImage::new_rgb8(200, 200));
-        assert_eq!((cropped.width(), cropped.height()), (200, 200));
+    fn a_tall_cover_is_cropped_to_sixteen_by_nine() {
+        // 180x360 into 16:9 takes the full width and the middle 101 rows.
+        let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(180, 360), 16, 9);
+        assert_eq!((cropped.width(), cropped.height()), (180, 101));
     }
 
     #[test]
