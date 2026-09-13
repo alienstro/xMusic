@@ -35,11 +35,10 @@ const ASPECT_HEIGHT: u16 = 9;
 
 /// Rows the now-playing card grows to when it has room to show a cover.
 ///
-/// Nine rows is not arbitrary: a cell is one pixel wide and two tall, so a
-/// 16:9 cover at nine rows is 32 cells wide, and the crate then asks for
-/// 320x180 pixels, which is exactly what `mqdefault` is. The source is drawn
-/// pixel for pixel, and nothing is resampled at all.
-const ART_ROWS: u16 = 9;
+/// Fourteen rows almost doubles the half-block resolution of the old box.
+/// A cell is one pixel wide and two tall, so a 16:9 cover at fourteen rows is
+/// 49 cells wide. The source is scaled to that larger pixel target.
+const ART_ROWS: u16 = 14;
 
 /// Rows the card takes when it shows no cover, matching the height the
 /// interface used before artwork existed.
@@ -47,12 +46,12 @@ const PLAIN_ROWS: u16 = 3;
 const PLAIN_ROWS_NO_SUBTITLE: u16 = 2;
 
 /// Terminal height below which the cover is not worth its rows, and is dropped.
-const ART_MIN_CANVAS_HEIGHT: u16 = 24;
+const ART_MIN_CANVAS_HEIGHT: u16 = 25;
 
 /// Cells of width of the cover. The floor keeps a short card from drawing a
 /// sliver, and the ceiling keeps the cover from crowding out the title beside it.
 const MIN_ART_WIDTH: u16 = 8;
-const MAX_ART_WIDTH: u16 = 36;
+const MAX_ART_WIDTH: u16 = 49;
 
 /// Columns the title beside the cover needs before the cover is worth showing.
 /// Below this the two would fight over the same cells, and the title is the one
@@ -258,11 +257,11 @@ mod tests {
 
     #[test]
     fn a_cover_is_shown_only_on_an_image_terminal_with_the_room_for_it() {
-        // 32-wide cover + 2 gap + 24 of title = 58 columns is the threshold.
-        assert!(shows_art(true, 80, 24));
-        assert!(shows_art(true, 58, 24));
-        assert!(!shows_art(true, 57, 24));
-        assert!(!shows_art(true, 80, 23));
+        // 49-wide cover + 2 gap + 24 of title = 75 columns is the threshold.
+        assert!(shows_art(true, 80, 25));
+        assert!(shows_art(true, 75, 25));
+        assert!(!shows_art(true, 74, 25));
+        assert!(!shows_art(true, 80, 24));
         assert!(!shows_art(false, 200, 50));
     }
 
@@ -279,16 +278,15 @@ mod tests {
 
     #[test]
     fn the_cover_draws_at_sixteen_by_nine() {
-        // Nine rows is two pixels per row, so a 16:9 cover is 32 cells wide.
-        assert_eq!(art_width(9), 32);
+        // Fourteen rows is two pixels per row, so a 16:9 cover is 49 cells wide.
+        assert_eq!(art_width(14), 49);
     }
 
     #[test]
-    fn nine_rows_asks_for_exactly_a_mqdefault_thumbnail() {
-        // The whole point of the 16:9 shape at nine rows: the pixel target is
-        // 320x180, which is what mqdefault already is, so nothing resamples.
-        let target = target_pixels((10, 20), Rect::new(0, 0, 32, 9));
-        assert_eq!(target, (320, 180));
+    fn fourteen_rows_asks_for_the_larger_pixel_target() {
+        // The larger box draws with more cells than the source thumbnail.
+        let target = target_pixels((10, 20), Rect::new(0, 0, 49, 14));
+        assert_eq!(target, (490, 280));
     }
 
     #[test]

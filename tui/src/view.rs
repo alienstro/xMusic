@@ -63,7 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut Model) {
     let show_columns = canvas.height >= 16;
     let show_hints = canvas.height >= 13;
     let show_subtitle = canvas.height >= 12;
-    // The cover takes eight rows, so the card grows only where the list can
+    // The cover takes fourteen rows, so the card grows only where the list can
     // spare them and there is a cover to put there. Waiting for a thumbnail
     // rather than reserving on every tall terminal keeps an idle card at its
     // old height instead of standing open on empty space.
