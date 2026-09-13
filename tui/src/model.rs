@@ -33,6 +33,9 @@ pub struct Model {
     pub should_quit: bool,
     /// When the interface opened, which is all a spinner needs to turn at one speed whatever the redraw rate.
     pub started: Instant,
+    /// Album art: the terminal's image backend, the covers fetched so far, and
+    /// the one being drawn.
+    pub artwork: crate::artwork::Artwork,
 
     pub(crate) stop_daemon_then_quit: bool,
     /// Values the user has just asked for, held until the daemon confirms them.
@@ -62,6 +65,7 @@ impl Default for Model {
             loading_list: false,
             should_quit: false,
             started: Instant::now(),
+            artwork: crate::artwork::Artwork::default(),
             stop_daemon_then_quit: false,
             guessed_volume: None,
             guessed_position: None,

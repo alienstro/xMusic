@@ -145,6 +145,21 @@
     return likedFrom(control.data?.likeStatus || control.getAttribute('like-status'));
   }
 
+  // The now-playing cover, for the terminal to draw.
+  //
+  // Built from the video id rather than read off the player bar. blockImages()
+  // redirects every image on the page to BLANK_IMAGE, and it does so through
+  // both the `src` setter and setAttribute, so the real URL is not left behind
+  // on the element to read back. YouTube serves a cover at this address for
+  // every video id, which the page already reports, so nothing is lost by
+  // not asking the DOM for something it deliberately threw away.
+  //
+  // `mqdefault` is the mid size at the video's own 16:9. `hqdefault` is 4:3
+  // with black bars, and `maxresdefault` is not generated for every video.
+  function nowPlayingThumbnail(videoId) {
+    return videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : '';
+  }
+
   function readState() {
     const p = player();
     if (!p || typeof p.getPlayerState !== 'function') {
@@ -159,7 +174,10 @@
         `search=${typeof window.__xmSearch}`,
       ].join(' ');
       return { ready: false, apiReady: !!cfg().INNERTUBE_API_KEY, videoId: '',
-               title: '', artist: '', byline: '', diagnostic, isPlaying: false,
+               title: '', artist: '', byline: '', thumbnail: '', diagnostic, isPlaying: false,
+               // thumbnail is empty here on purpose: with no player there is no
+               // video id, and a cover for a track nobody is playing is worse
+               // than none.
                isBuffering: false, position: 0, duration: 0, volume: 0,
                muted: false, loggedIn: !!cfg().LOGGED_IN, liked: null };
     }
@@ -175,6 +193,7 @@
       artist: data.author || '',
       // Richer than `author` and cosmetic only, so a selector change degrades the label rather than breaking state.
       byline: bar ? bar.textContent.trim() : '',
+      thumbnail: nowPlayingThumbnail(data.video_id),
       diagnostic: '',
       isPlaying: state === PLAYING,
       isBuffering: state === BUFFERING,

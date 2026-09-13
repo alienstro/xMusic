@@ -1,6 +1,7 @@
 //! xmusic: terminal client for the xmusic-player daemon (crate `xmusic-tui`).
 
 mod adapters;
+mod artwork;
 mod effects;
 mod model;
 mod panes;
@@ -202,9 +203,14 @@ fn main() -> io::Result<()> {
         }
     };
 
+    // Ask the terminal what image protocol it speaks before ratatui takes the
+    // screen: the query is answered on stdin, and crossterm is reading it raw
+    // by then, so the answer would arrive as a keypress instead.
+    let artwork = artwork::Artwork::query();
+
     // Enter the alternate screen only once the daemon question is settled, so a startup error stays readable.
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, opening);
+    let result = run(&mut terminal, opening, artwork);
     ratatui::restore();
     result
 }
@@ -349,10 +355,13 @@ fn prepare_daemon(no_spawn: bool) -> Result<String, String> {
 /// Nothing here decides anything. Terminal events and the runner's replies both
 /// become messages, `update` is the only thing that changes the model, and every
 /// effect it returns goes straight back out to the runner.
-fn run(terminal: &mut ratatui::DefaultTerminal, opening: String) -> io::Result<()> {
+fn run(terminal: &mut ratatui::DefaultTerminal, opening: String, artwork: artwork::Artwork) -> io::Result<()> {
     let runner = Runner::spawn();
-    let mut model = Model::default();
-    model.status = opening;
+    let mut model = Model {
+        artwork,
+        status: opening,
+        ..Model::default()
+    };
 
     while !model.should_quit {
         for message in runner.drain() {

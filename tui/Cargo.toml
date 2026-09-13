@@ -21,6 +21,15 @@ serde.workspace = true
 serde_json.workspace = true
 unicode-width.workspace = true
 
+# Album art in the now-playing card. Pinned to 9.x because 10 and newer require
+# ratatui 0.30, and this crate is on 0.29. See src/artwork.rs.
+#
+# Defaults off: they also turn on image-defaults, which compiles every codec.
+# The direct `image` dependency below turns on only the two formats a thumbnail
+# arrives in, and cargo unifies that onto the copy ratatui-image uses.
+ratatui-image = { version = "9", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 # Reading a YouTube session out of a Chromium browser. See src/cookies.rs.
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }

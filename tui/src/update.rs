@@ -39,6 +39,11 @@ pub enum Message {
     },
     DaemonStopped(String),
     DaemonStopFailed(String),
+    /// A decoded cover, under the URL it was fetched from.
+    ArtworkReady {
+        url: String,
+        image: image::DynamicImage,
+    },
 }
 
 pub fn update(model: &mut Model, message: Message) -> Vec<Effect> {
@@ -53,6 +58,17 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Effect> {
             if model.player.video_id != was {
                 model.awaiting = None;
             }
+            // The card draws the cover the player reports, and asks for it once.
+            let url = model.player.thumbnail.clone();
+            if model.artwork.want(&url) {
+                vec![Effect::Artwork(url)]
+            } else {
+                Vec::new()
+            }
+        }
+
+        Message::ArtworkReady { url, image } => {
+            model.artwork.deliver(&url, image);
             Vec::new()
         }
 

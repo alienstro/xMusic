@@ -63,7 +63,13 @@ pub fn draw(frame: &mut Frame, app: &mut Model) {
     let show_columns = canvas.height >= 16;
     let show_hints = canvas.height >= 13;
     let show_subtitle = canvas.height >= 12;
-    let now_playing_height = if show_subtitle { 3 } else { 2 };
+    // The cover takes eight rows, so the card grows only where the list can
+    // spare them and there is a cover to put there. Waiting for a thumbnail
+    // rather than reserving on every tall terminal keeps an idle card at its
+    // old height instead of standing open on empty space.
+    let art = crate::artwork::shows_art(app.artwork.available(), canvas.height)
+        && !app.player.thumbnail.is_empty();
+    let now_playing_height = crate::artwork::band_height(art, show_subtitle);
 
     let mut rows = vec![
         Constraint::Length(1), // identity + connection
@@ -101,7 +107,7 @@ pub fn draw(frame: &mut Frame, app: &mut Model) {
     }
     draw_results(frame, app, next(), &columns);
     draw_rule(frame, next());
-    draw_now_playing(frame, app, next(), show_subtitle);
+    draw_now_playing(frame, app, next(), show_subtitle, art);
     draw_rule(frame, next());
     draw_status(frame, app, next());
     if show_hints {
@@ -390,7 +396,50 @@ fn empty_hint(app: &Model) -> String {
 
 // ------------------------------------------------------------- now playing ----
 
-fn draw_now_playing(frame: &mut Frame, app: &Model, area: Rect, show_subtitle: bool) {
+fn draw_now_playing(frame: &mut Frame, app: &mut Model, area: Rect, show_subtitle: bool, art: bool) {
+    if art {
+        draw_player_card(frame, app, area, show_subtitle);
+        return;
+    }
+    draw_player_text(frame, app, area, show_subtitle);
+}
+
+/// The now-playing card with a cover: art on the left, the title, artist and
+/// transport stacked to its right. The art column is the cover's own width plus
+/// a gap, so the two never touch.
+fn draw_player_card(frame: &mut Frame, app: &mut Model, area: Rect, show_subtitle: bool) {
+    let width = crate::artwork::art_width(area.height);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(width + 2), Constraint::Min(20)])
+        .split(area);
+
+    // The image draws into a square inset, vertically centred, so a card taller
+    // than the cover does not stretch it.
+    let art_area = centered_square(columns[0], width);
+    if let (Some(protocol), true) = (app.artwork.protocol(), art_area.width > 0) {
+        let image = ratatui_image::StatefulImage::default();
+        frame.render_stateful_widget(image, art_area, protocol);
+    }
+
+    draw_player_text(frame, app, columns[1], show_subtitle);
+}
+
+/// The cover's box: `width` cells wide and the same number of pixels tall,
+/// centred in the cell it was given.
+fn centered_square(area: Rect, width: u16) -> Rect {
+    let height = (width / 2).min(area.height);
+    Rect {
+        x: area.x,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width: width.min(area.width),
+        height,
+    }
+}
+
+/// The now-playing text on its own: the transport line, the title, the artist.
+fn draw_player_text(frame: &mut Frame, app: &Model, area: Rect, show_subtitle: bool) {
     let player = &app.player;
     let indent = " ".repeat(GUTTER_WIDTH);
 

@@ -20,6 +20,9 @@ pub struct PlayerState {
     pub artist: String,
     /// "Artist • Album • Year" as shown in the player bar. Cosmetic.
     pub byline: String,
+    /// Largest artwork URL the player bar carries. Empty when the bar has no
+    /// image, or when a daemon older than this field is running.
+    pub thumbnail: String,
     /// Set only while `ready` is false: how the page looks to the injected script, which is the one thing worth knowing when the daemon never reports a player.
     pub diagnostic: String,
     pub is_playing: bool,

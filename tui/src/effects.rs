@@ -45,6 +45,9 @@ pub enum Effect {
     Transport(TransportAction),
     Seek { delta: i64 },
     Volume { delta: i64 },
+    /// Fetch a cover and decode it. Carries the track's artwork URL and nothing
+    /// else, so the answer can be checked against the track that is playing now.
+    Artwork(String),
     ShowWindow,
     HideWindow,
     SignIn,
@@ -123,6 +126,17 @@ fn worker(effects: Receiver<Effect>, stop: Receiver<()>, messages: Sender<Messag
             Ok(Effect::Seek { delta }) => seek.add(delta),
             Ok(Effect::Volume { delta }) => volume.add(delta),
             // Signing in reads a keychain and copies a database, far too slow to hold up polling and unordered with respect to the page anyway.
+            // Fetching a cover is a network round trip to a CDN, which has
+            // nothing to do with the daemon's poll cadence and must not wait in
+            // line behind it, so it gets its own thread like sign-in does.
+            Ok(Effect::Artwork(url)) => {
+                let messages = messages.clone();
+                std::thread::spawn(move || {
+                    if let Some(image) = crate::artwork::fetch(&url) {
+                        let _ = messages.send(Message::ArtworkReady { url, image });
+                    }
+                });
+            }
             Ok(Effect::SignIn) => {
                 let messages = messages.clone();
                 std::thread::spawn(move || {
@@ -228,6 +242,8 @@ fn perform(effect: &Effect, timeout: Duration) -> Result<(), String> {
         Effect::HideWindow => http_client::set_window_visible(false, timeout),
         Effect::SignIn => sign_in().map(|_| ()),
         Effect::StopDaemon => daemon_process::stop().map(|_| ()),
+        // Handled on its own thread in the worker, never reaching this table.
+        Effect::Artwork(_) => Ok(()),
     }
 }
 
