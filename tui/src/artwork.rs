@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::time::Duration;
 
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView, Pixel};
 use ratatui::layout::Rect;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -115,6 +115,58 @@ pub fn target_pixels(font_size: (u16, u16), area: Rect) -> (u32, u32) {
         area.width as u32 * font_size.0 as u32,
         area.height as u32 * font_size.1 as u32,
     )
+}
+
+/// Removes flat bands from the left and right edges of a thumbnail.
+///
+/// YouTube thumbnails can contain a centred video frame with a flat colour on
+/// each side. Those bands are not artwork, so cropping them here prevents them
+/// from becoming empty space in the now-playing card.
+pub fn trim_flat_side_bands(image: DynamicImage) -> DynamicImage {
+    let (width, height) = image.dimensions();
+    if width < 3 || height == 0 {
+        return image;
+    }
+
+    // A band must be at least this wide to count as padding rather than detail.
+    let min_band = (width / 20).max(1);
+    let left = flat_band(&image, true, min_band, height);
+    let right = flat_band(&image, false, min_band, height);
+    let trimmed = left + right;
+    if trimmed == 0 || trimmed >= width as usize {
+        return image;
+    }
+
+    image.crop_imm(left as u32, 0, width - trimmed as u32, height)
+}
+
+fn flat_band(image: &DynamicImage, forward: bool, min_width: u32, height: u32) -> usize {
+    let width = image.width() as usize;
+    let edge = if forward { 0 } else { width - 1 };
+    let color = image.get_pixel(edge as u32, 0);
+    let mut run = 0usize;
+
+    for offset in 0..width {
+        let x = if forward {
+            offset
+        } else {
+            width - 1 - offset
+        };
+        let flat = (0..height).all(|y| {
+            image
+                .get_pixel(x as u32, y)
+                .channels()
+                .iter()
+                .zip(color.channels())
+                .all(|(a, b)| a.abs_diff(*b) <= 6)
+        });
+        if !flat {
+            break;
+        }
+        run += 1;
+    }
+
+    if run >= min_width as usize { run } else { 0 }
 }
 
 /// When to fetch a cover, and what to do with one that arrives.
@@ -242,8 +294,12 @@ impl Artwork {
         };
         if stale {
             let (width, height) = target_pixels(picker.font_size(), area);
-            let prepared = crop_to_aspect(image.clone(), ASPECT_WIDTH, ASPECT_HEIGHT)
-                .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            let prepared = crop_to_aspect(
+                trim_flat_side_bands(image.clone()),
+                ASPECT_WIDTH,
+                ASPECT_HEIGHT,
+            )
+            .resize_exact(width, height, image::imageops::FilterType::Lanczos3);
             let protocol = picker.new_resize_protocol(prepared);
             self.shown = Some((self.wanted.clone(), area, protocol));
         }
@@ -314,6 +370,32 @@ mod tests {
         // 180x360 into 16:9 takes the full width and the middle 101 rows.
         let cropped = crop_to_aspect(image::DynamicImage::new_rgb8(180, 360), 16, 9);
         assert_eq!((cropped.width(), cropped.height()), (180, 101));
+    }
+
+    #[test]
+    fn flat_side_bands_are_removed_before_the_cover_is_fitted() {
+        let mut image = image::DynamicImage::new_rgb8(320, 180);
+        for (x, _, pixel) in image.as_mut_rgb8().unwrap().enumerate_pixels_mut() {
+            *pixel = if !(60..260).contains(&x) {
+                image::Rgb([64, 64, 64])
+            } else {
+                image::Rgb([(x % 251) as u8, ((x * 3) % 251) as u8, ((x * 7) % 251) as u8])
+            };
+        }
+
+        let cropped = trim_flat_side_bands(image);
+        assert_eq!((cropped.width(), cropped.height()), (200, 180));
+    }
+
+    #[test]
+    fn varied_edges_are_not_treated_as_side_bands() {
+        let mut image = image::DynamicImage::new_rgb8(320, 180);
+        for (x, _, pixel) in image.as_mut_rgb8().unwrap().enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x % 251) as u8, ((x * 3) % 251) as u8, ((x * 7) % 251) as u8]);
+        }
+
+        let cropped = trim_flat_side_bands(image);
+        assert_eq!((cropped.width(), cropped.height()), (320, 180));
     }
 
     #[test]
